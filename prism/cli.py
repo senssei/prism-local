@@ -6,6 +6,7 @@ prism.cli: Main Command-Line Interface for prism.
 import argparse
 import json
 import sys
+
 from prism.catalog import ModelCatalog
 from prism.chat import run_interactive_chat
 from prism.benchmark import run_benchmark
@@ -13,6 +14,7 @@ from prism.server import start_server
 from prism.telemetry import get_gpu_info, bootstrap_cuda_env
 from prism.engine import OnnxGenAiEngine, format_prompt, OG_AVAILABLE
 from prism.ollama_bridge import is_ollama_running, stream_ollama_chat
+from prism.connectors import connect_cursor, connect_cline, connect_mcp
 
 
 def cmd_status(args):
@@ -74,8 +76,17 @@ def cmd_list(args):
 
 def cmd_pull(args):
     catalog = ModelCatalog()
-    catalog.pull_model(args.model, output_dir=args.output_dir)
-    print("✅ Model download complete.")
+    res = catalog.pull_model(
+        args.model,
+        output_dir=args.output_dir,
+        ep=args.ep,
+        quant=args.quant,
+        backend=args.backend,
+    )
+    if res:
+        print("✅ Model pull completed.")
+    else:
+        print("❌ Model pull failed or aborted.")
 
 
 def cmd_run(args):
@@ -122,6 +133,36 @@ def cmd_benchmark(args):
     run_benchmark(args.model)
 
 
+def cmd_mcp(args):
+    from prism.mcp import run_mcp_server
+    run_mcp_server()
+
+
+def cmd_connect(args):
+    target = getattr(args, "connect_target", None)
+    if target == "cursor":
+        connect_cursor(
+            model=args.model,
+            export_rules=args.export_rules,
+            export_mcp=args.export_mcp,
+            test=args.test,
+        )
+    elif target == "cline":
+        connect_cline(
+            model=args.model,
+            export_mcp=args.export_mcp,
+            test=args.test,
+        )
+    elif target == "mcp":
+        connect_mcp(
+            target=args.target,
+            write=args.write,
+            test=args.test,
+        )
+    else:
+        print("Specify a connector target: 'prism connect cursor', 'prism connect cline', or 'prism connect mcp'.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="prism",
@@ -143,9 +184,12 @@ def main():
     p_list.set_defaults(func=cmd_list)
 
     # pull
-    p_pull = subparsers.add_parser("pull", help="Download ONNX models directly from Hugging Face")
-    p_pull.add_argument("model", help="Hugging Face repo ID or alias (e.g. phi-4-mini)")
+    p_pull = subparsers.add_parser("pull", help="Download ONNX models (Hugging Face) or GGUF models (Ollama)")
+    p_pull.add_argument("model", help="Model name, alias, or Hugging Face repo ID (e.g. phi-4-mini, ollama:qwen2.5-coder:7b)")
     p_pull.add_argument("--output-dir", default="models", help="Destination folder (default: models)")
+    p_pull.add_argument("--ep", choices=["cuda", "cpu"], default=None, help="Target execution provider (default: auto-detect)")
+    p_pull.add_argument("--quant", choices=["int4", "fp16"], default="int4", help="Quantization level (default: int4)")
+    p_pull.add_argument("--backend", choices=["auto", "onnx", "ollama"], default="auto", help="Inference backend (default: auto)")
     p_pull.set_defaults(func=cmd_pull)
 
     # run
@@ -163,13 +207,43 @@ def main():
     # serve
     p_serve = subparsers.add_parser("serve", help="Launch OpenAI-compatible REST server")
     p_serve.add_argument("--port", type=int, default=5272, help="Port to listen on (default: 5272)")
-    p_serve.add_argument("--host", default="127.0.0.1", help="Host interface (default: 127.0.0.1)")
+    p_serve.add_argument("--host", default="0.0.0.0", help="Host interface (default: 0.0.0.0)")
     p_serve.set_defaults(func=cmd_serve)
 
     # benchmark
     p_bench = subparsers.add_parser("benchmark", help="Run automated micro-benchmark (TTFT, tok/s, VRAM)")
     p_bench.add_argument("model", help="Model to benchmark (e.g. Phi-4-mini-instruct-cuda-gpu)")
     p_bench.set_defaults(func=cmd_benchmark)
+
+    # mcp
+    p_mcp = subparsers.add_parser("mcp", help="Run Prism as a stdio Model Context Protocol (MCP) server")
+    p_mcp.set_defaults(func=cmd_mcp)
+
+    # connect
+    p_conn = subparsers.add_parser("connect", help="Configure IDEs, extensions, and MCP clients")
+    conn_sub = p_conn.add_subparsers(dest="connect_target", help="Connector target")
+
+    # connect cursor
+    p_conn_cursor = conn_sub.add_parser("cursor", help="Generate Cursor IDE configuration and .cursorrules")
+    p_conn_cursor.add_argument("--model", help="Preferred model ID")
+    p_conn_cursor.add_argument("--export-rules", action="store_true", help="Write .cursorrules file in current directory")
+    p_conn_cursor.add_argument("--export-mcp", action="store_true", help="Write .cursor/mcp.json in current directory")
+    p_conn_cursor.add_argument("--test", action="store_true", help="Test reachability of Prism server")
+    p_conn_cursor.set_defaults(func=cmd_connect)
+
+    # connect cline
+    p_conn_cline = conn_sub.add_parser("cline", help="Generate Cline extension OpenAI & MCP settings")
+    p_conn_cline.add_argument("--model", help="Preferred model ID")
+    p_conn_cline.add_argument("--export-mcp", action="store_true", help="Write cline_mcp_settings.json in current directory")
+    p_conn_cline.add_argument("--test", action="store_true", help="Test reachability of Prism server")
+    p_conn_cline.set_defaults(func=cmd_connect)
+
+    # connect mcp
+    p_conn_mcp = conn_sub.add_parser("mcp", help="Configure MCP clients (Antigravity, Cursor, Cline, Claude)")
+    p_conn_mcp.add_argument("--target", choices=["all", "antigravity", "cursor", "cline", "claude"], default="all", help="Target client")
+    p_conn_mcp.add_argument("--write", action="store_true", help="Write or update the target MCP configuration file")
+    p_conn_mcp.add_argument("--test", action="store_true", help="Run JSON-RPC protocol handshake test")
+    p_conn_mcp.set_defaults(func=cmd_connect)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):

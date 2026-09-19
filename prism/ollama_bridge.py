@@ -78,3 +78,53 @@ def stream_ollama_chat(
                         yield content
                 except Exception:
                     continue
+
+
+def pull_ollama_model(model_name: str, base_url: str = OLLAMA_BASE_URL) -> bool:
+    """Pulls an Ollama model using the streaming /api/pull endpoint with progress display."""
+    clean_model = model_name.replace("ollama:", "")
+    if not is_ollama_running(base_url):
+        print(f"❌ Cannot pull Ollama model '{clean_model}': Ollama daemon is not running at {base_url}.")
+        return False
+
+    print(f"🦙 Pulling Ollama model '{clean_model}' from registry...")
+    payload = {"name": clean_model, "stream": True}
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}/api/pull",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    last_status = ""
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            for line in resp:
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line.decode("utf-8"))
+                    status = chunk.get("status", "")
+                    total = chunk.get("total", 0)
+                    completed = chunk.get("completed", 0)
+
+                    if total > 0 and completed > 0:
+                        pct = (completed / total) * 100
+                        mb_done = completed / (1024 * 1024)
+                        mb_total = total / (1024 * 1024)
+                        msg = f"\r   📥 {status}: {mb_done:.1f} MB / {mb_total:.1f} MB ({pct:.1f}%)"
+                        print(msg, end="", flush=True)
+                    elif status != last_status:
+                        if last_status and "\r" in last_status:
+                            print()
+                        print(f"   ℹ️  {status}")
+                        last_status = status
+                except Exception:
+                    continue
+        print(f"\n✅ Ollama model '{clean_model}' pulled successfully.")
+        return True
+    except Exception as ex:
+        print(f"\n❌ Failed to pull Ollama model '{clean_model}': {ex}")
+        return False
+

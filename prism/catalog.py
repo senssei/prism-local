@@ -6,38 +6,125 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from prism.ollama_bridge import list_ollama_models
+
+from prism.ollama_bridge import list_ollama_models, pull_ollama_model
+from prism.telemetry import get_gpu_info
 
 KNOWN_HF_MODELS = {
     "phi-4-mini": {
         "repo_id": "microsoft/Phi-4-mini-instruct-onnx",
-        "pattern": "gpu/gpu-int4-rtn-block-32/*",
-        "subfolder": "gpu/gpu-int4-rtn-block-32",
-        "name": "Phi-4-mini-instruct-cuda-gpu",
+        "variants": {
+            "cuda": {
+                "pattern": "gpu/gpu-int4-rtn-block-32/*",
+                "subfolder": "gpu/gpu-int4-rtn-block-32",
+                "name": "Phi-4-mini-instruct-cuda-gpu",
+            },
+            "cpu": {
+                "pattern": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
+                "subfolder": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4",
+                "name": "Phi-4-mini-instruct-generic-cpu",
+            },
+        },
         "family": "Phi-4",
     },
     "phi-4": {
         "repo_id": "microsoft/phi-4-onnx",
-        "pattern": "gpu/gpu-int4-rtn-block-32/*",
-        "subfolder": "gpu/gpu-int4-rtn-block-32",
-        "name": "Phi-4-instruct-cuda-gpu",
+        "variants": {
+            "cuda": {
+                "pattern": "gpu/gpu-int4-rtn-block-32/*",
+                "subfolder": "gpu/gpu-int4-rtn-block-32",
+                "name": "Phi-4-instruct-cuda-gpu",
+            },
+            "cpu": {
+                "pattern": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
+                "subfolder": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4",
+                "name": "Phi-4-instruct-generic-cpu",
+            },
+        },
         "family": "Phi-4",
     },
     "phi-3.5-mini": {
         "repo_id": "microsoft/Phi-3.5-mini-instruct-onnx",
-        "pattern": "gpu/gpu-int4-rtn-block-32/*",
-        "subfolder": "gpu/gpu-int4-rtn-block-32",
-        "name": "Phi-3.5-mini-instruct-cuda-gpu",
+        "variants": {
+            "cuda": {
+                "pattern": "gpu/gpu-int4-rtn-block-32/*",
+                "subfolder": "gpu/gpu-int4-rtn-block-32",
+                "name": "Phi-3.5-mini-instruct-cuda-gpu",
+            },
+            "cpu": {
+                "pattern": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
+                "subfolder": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4",
+                "name": "Phi-3.5-mini-instruct-generic-cpu",
+            },
+        },
         "family": "Phi-3.5",
     },
     "qwen2.5-coder-7b": {
         "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-ONNX",
-        "pattern": "*",
-        "subfolder": None,
-        "name": "qwen2.5-coder-7b-onnx",
+        "variants": {
+            "cuda": {
+                "pattern": "*",
+                "subfolder": None,
+                "name": "qwen2.5-coder-7b-onnx",
+            },
+            "cpu": {
+                "pattern": "*",
+                "subfolder": None,
+                "name": "qwen2.5-coder-7b-onnx",
+            },
+        },
         "family": "Qwen2.5",
     },
+    "qwen2.5-coder-1.5b": {
+        "repo_id": "Qwen/Qwen2.5-Coder-1.5B-Instruct-ONNX",
+        "variants": {
+            "cuda": {
+                "pattern": "*",
+                "subfolder": None,
+                "name": "qwen2.5-coder-1.5b-onnx",
+            },
+            "cpu": {
+                "pattern": "*",
+                "subfolder": None,
+                "name": "qwen2.5-coder-1.5b-onnx",
+            },
+        },
+        "family": "Qwen2.5",
+    },
+    "deepseek-r1-distill-qwen-7b": {
+        "repo_id": "onnx-community/DeepSeek-R1-Distill-Qwen-7B-ONNX",
+        "variants": {
+            "cuda": {
+                "pattern": "*",
+                "subfolder": None,
+                "name": "deepseek-r1-distill-qwen-7b-onnx",
+            },
+            "cpu": {
+                "pattern": "*",
+                "subfolder": None,
+                "name": "deepseek-r1-distill-qwen-7b-onnx",
+            },
+        },
+        "family": "DeepSeek-R1",
+    },
+    "llama-3.2-3b-instruct": {
+        "repo_id": "microsoft/Llama-3.2-3B-Instruct-ONNX",
+        "variants": {
+            "cuda": {
+                "pattern": "gpu/gpu-int4-rtn-block-32/*",
+                "subfolder": "gpu/gpu-int4-rtn-block-32",
+                "name": "llama-3.2-3b-instruct-cuda-gpu",
+            },
+            "cpu": {
+                "pattern": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
+                "subfolder": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4",
+                "name": "llama-3.2-3b-instruct-generic-cpu",
+            },
+        },
+        "family": "Llama-3.2",
+    },
 }
+
 
 class ModelCatalog:
     def __init__(self, search_paths: Optional[List[str]] = None):
@@ -64,7 +151,7 @@ class ModelCatalog:
                     # If folder is v1/v2/v5, use parent name
                     if name.startswith("v") and name[1:].isdigit():
                         name = f"{model_dir.parent.name}:{name}"
-                    
+
                     size_bytes = sum(f.stat().st_size for f in model_dir.glob("*") if f.is_file())
                     cfg_path = model_dir / "genai_config.json"
                     device = "CPU"
@@ -124,19 +211,59 @@ class ModelCatalog:
 
         return None
 
-    def pull_model(self, model_id_or_alias: str, output_dir: str = "models") -> str:
-        """Pulls genuine ONNX models directly from Hugging Face."""
-        from huggingface_hub import snapshot_download
+    def pull_model(
+        self,
+        model_id_or_alias: str,
+        output_dir: str = "models",
+        ep: Optional[str] = None,
+        quant: str = "int4",
+        backend: str = "auto",
+    ) -> Optional[str]:
+        """
+        Pulls models across either Hugging Face (ONNX) or Ollama (GGUF).
+        """
+        # 1. Route to Ollama if explicitly requested or prefixed
+        if backend == "ollama" or model_id_or_alias.startswith("ollama:"):
+            success = pull_ollama_model(model_id_or_alias)
+            return model_id_or_alias if success else None
 
-        target_info = KNOWN_HF_MODELS.get(model_id_or_alias.lower())
+        # 2. Determine execution provider (CUDA vs CPU)
+        if ep is None:
+            gpu_info = get_gpu_info()
+            ep = "cuda" if gpu_info.get("available") else "cpu"
+        ep = ep.lower()
+
+        # 3. Resolve Hugging Face repository and pattern
+        alias_key = model_id_or_alias.lower()
+        target_info = KNOWN_HF_MODELS.get(alias_key)
+
         repo_id = target_info["repo_id"] if target_info else model_id_or_alias
-        dest_name = target_info["name"] if target_info else repo_id.split("/")[-1]
-        pattern = target_info["pattern"] if target_info else None
+        subfolder = None
+        pattern = None
+
+        if target_info:
+            variants = target_info.get("variants", {})
+            variant = variants.get(ep) or variants.get("cuda") or variants.get("cpu")
+            if variant:
+                dest_name = variant.get("name")
+                pattern = variant.get("pattern")
+                subfolder = variant.get("subfolder")
+            else:
+                dest_name = f"{alias_key}-{ep}"
+        else:
+            dest_name = repo_id.split("/")[-1]
 
         dest_path = Path(output_dir) / dest_name
         dest_path.mkdir(parents=True, exist_ok=True)
 
-        print(f"📥 Pulling model '{repo_id}' to: {dest_path}")
+        print(f"📥 Pulling ONNX model '{repo_id}' [{ep.upper()} | {quant.upper()}] to: {dest_path}")
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            print("❌ 'huggingface_hub' is required to pull models from Hugging Face.")
+            print("   Install via: pip install huggingface_hub")
+            return None
+
         kwargs: Dict[str, Any] = {
             "repo_id": repo_id,
             "local_dir": str(dest_path),
@@ -145,15 +272,37 @@ class ModelCatalog:
         if pattern:
             kwargs["allow_patterns"] = [pattern]
 
-        snapshot_download(**kwargs)
+        try:
+            snapshot_download(**kwargs)
+        except Exception as ex:
+            print(f"❌ Failed to download repository '{repo_id}': {ex}")
+            return None
 
-        # Move subfolder contents if nested
-        if target_info and target_info.get("subfolder"):
-            sub_dir = dest_path / target_info["subfolder"]
+        # Move subfolder contents to root of dest_path if nested
+        if subfolder:
+            sub_dir = dest_path / subfolder
             if sub_dir.exists():
                 for item in sub_dir.iterdir():
                     target = dest_path / item.name
                     if not target.exists():
                         item.rename(target)
+
+        # 4. Post-pull verification
+        has_config = (dest_path / "genai_config.json").exists()
+        has_weights = any(dest_path.glob("*.onnx")) or any(dest_path.glob("*.onnx.data"))
+        size_bytes = sum(f.stat().st_size for f in dest_path.glob("*") if f.is_file())
+        size_mb = round(size_bytes / (1024 * 1024), 1)
+
+        print("\n" + "=" * 60)
+        print(" 📦 MODEL DOWNLOAD VERIFICATION")
+        print("=" * 60)
+        print(f"  • Model Directory: {dest_path}")
+        print(f"  • Total Size:      {size_mb} MB")
+        print(f"  • genai_config:    {'✅ Present' if has_config else '⚠️ Missing'}")
+        print(f"  • Model Weights:   {'✅ Present' if has_weights else '⚠️ Missing'}")
+        print(f"  • Target Hardware: {ep.upper()}")
+        print("=" * 60)
+        print(f"\n💡 Test your model with:")
+        print(f"   prism run {dest_name} \"Write a hello world program in Python.\"\n")
 
         return str(dest_path)

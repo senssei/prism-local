@@ -2,7 +2,7 @@
 
 A high-performance, developer-first local AI CLI and OpenAI-compatible inference server for **Linux & WSL2**.
 
-**Prism** refracts disparate local AI runtimes—**ONNX Runtime GenAI on NVIDIA CUDA** and **Ollama / llama.cpp (GGUF)**—into a single, unified developer experience with sub-millisecond dispatch, interactive streaming chat, automated benchmarking, and zero-dependency REST serving.
+**Prism** refracts disparate local AI runtimes—**ONNX Runtime GenAI on NVIDIA CUDA** and **Ollama / llama.cpp (GGUF)**—into a single, unified developer experience with sub-millisecond dispatch, interactive streaming chat, automated benchmarking, zero-dependency REST serving, and IDE connectors for **Cursor, Cline, and Model Context Protocol (MCP)**.
 
 ---
 
@@ -21,7 +21,8 @@ Prism replaces fragile single-engine tools with an open, multi-engine local runt
 | **Time to First Token (TTFT)**| ❌ 5.0 – 7.7 seconds | 🚀 **50 – 60 milliseconds** |
 | **REST Server Port** | ❌ Ephemeral random port (e.g. `:37863`) | 🟢 **Stable, fixed port (default: `:5272`)** |
 | **API Standardization** | ⚠️ OpenAI `/v1` on random port | 🟢 Full OpenAI `/v1/chat/completions` + SSE streaming |
-| **Model Ecosystem** | ❌ Microsoft catalog with 0 CUDA variants | 🟢 Pulls official ONNX weights directly from Hugging Face |
+| **Model Ecosystem** | ❌ Microsoft catalog with 0 CUDA variants | 🟢 Pulls official ONNX weights from HF & GGUF from Ollama |
+| **IDE & Agent Connectors**| ❌ None | 🟢 **Native Cursor, Cline, and MCP connectors** |
 | **VRAM Lifecycle** | ❌ Leaks ~99% VRAM on unload (Issue #1079) | 🟢 Complete GPU memory disposal on unload |
 | **Compatibility Aliases** | N/A | 🟢 Fully accessible via `prism`, `fng`, or `foundry-ng` |
 
@@ -59,9 +60,81 @@ prism serve --port 5272
 
 ---
 
+## 🔌 IDE & Agent Connectors (Cursor, Cline, MCP)
+
+Prism provides dedicated connectors for zero-friction integration with your favorite AI coding tools:
+
+### 1. Cursor IDE (`prism connect cursor`)
+Generate custom OpenAI provider settings, export workspace rules, and configure Cursor MCP:
+```bash
+# Display setup instructions and test connectivity
+prism connect cursor --test
+
+# Export .cursorrules into the current workspace
+prism connect cursor --export-rules
+
+# Export Cursor MCP configuration (.cursor/mcp.json)
+prism connect cursor --export-mcp
+```
+
+### 2. Cline Extension (`prism connect cline`)
+Configure Cline (VS Code / Cursor extension) to use Prism as an OpenAI-compatible provider and register MCP tools:
+```bash
+# Display Cline UI settings and test server reachability
+prism connect cline --test
+
+# Export cline_mcp_settings.json
+prism connect cline --export-mcp
+```
+
+### 3. Native Model Context Protocol (MCP) Server & Connector
+Prism contains a built-in stdio JSON-RPC 2.0 MCP server exposing 5 tools:
+- `prism_ask_coder`: Fast local code generation, bug fixing, test authoring with zero token cost.
+- `prism_code_review`: Security, concurrency, and performance code review.
+- `prism_list_models`: Discovered local models across both engines.
+- `prism_get_status`: Real-time NVML GPU telemetry and server status.
+- `prism_benchmark`: Automated latency and throughput micro-benchmark.
+
+```bash
+# Test MCP JSON-RPC protocol handshake
+prism connect mcp --test
+
+# Auto-wire Prism into Antigravity (~/.gemini/config/mcp_config.json)
+prism connect mcp --target antigravity --write
+
+# Auto-wire Cursor (.cursor/mcp.json)
+prism connect mcp --target cursor --write
+
+# Auto-wire Claude Desktop (~/.config/Claude/claude_desktop_config.json)
+prism connect mcp --target claude --write
+```
+
+---
+
+## 📥 Multi-Engine Model Pulling (`prism pull`)
+
+Download genuine ONNX models from Hugging Face or GGUF models via Ollama with live streaming progress:
+
+```bash
+# Pull official Microsoft Phi-4 Mini (CUDA INT4 GPU by default):
+prism pull phi-4-mini
+
+# Pull CPU variant explicitly:
+prism pull phi-4-mini --ep cpu
+
+# Pull custom Hugging Face ONNX repo:
+prism pull microsoft/Phi-4-mini-instruct-onnx
+
+# Pull Ollama GGUF model directly via Ollama registry:
+prism pull ollama:qwen2.5-coder:7b
+prism pull deepseek-r1:14b --backend ollama
+```
+
+---
+
 ## 📡 OpenAI-Compatible REST API
 
-`prism serve` provides a high-throughput, multi-threaded REST server running on a predictable static port (default `5272`).
+`prism serve` provides a high-throughput, multi-threaded REST server running on a predictable static port (default `5272` on `0.0.0.0` for WSL2/Windows host reachability).
 
 ### 1. List Available Models across Both Engines
 ```bash
@@ -114,22 +187,6 @@ prism benchmark Phi-4-mini-instruct-cuda-gpu
 
 ---
 
-## 📥 Model Management & Pulling
-
-Pull genuine GPU ONNX models directly from Hugging Face without Microsoft catalog gating:
-
-```bash
-# Pull official Microsoft Phi-4 Mini (INT4 AWQ GPU):
-prism pull phi-4-mini
-
-# Pull custom Hugging Face ONNX repo:
-prism pull microsoft/Phi-4-mini-instruct-onnx
-```
-
-Models are stored in `./models/` and dynamically indexed alongside `~/.foundry/cache/models/` and `../02-ollama-loadtest/models/`.
-
----
-
 ## 📑 Evaluation Whitepapers & Research
 
 - 📘 [**`EVALUATION_REPORT.md`**](EVALUATION_REPORT.md): Complete evaluation whitepaper comparing Microsoft Foundry against Ollama, vLLM, and llama.cpp across 8 metrics.
@@ -143,4 +200,4 @@ Models are stored in `./models/` and dynamically indexed alongside `~/.foundry/c
 ```bash
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
-All 18 automated unit tests verify NVML hardware detection, catalog resolution across both engines, prompt formatting, REST server endpoints, and SSE streaming.
+All **28 automated unit tests** verify NVML hardware detection, multi-engine catalog resolution, model pulling, prompt formatting, REST server endpoints, SSE streaming, MCP JSON-RPC protocol handshake, and Cursor/Cline connectors.
