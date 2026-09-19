@@ -1,5 +1,5 @@
 """
-foundry_ng.telemetry: Hardware Telemetry and CUDA Environment Bootstrapper.
+prism.telemetry: Hardware Telemetry and CUDA Environment Bootstrapper.
 Directly probes NVIDIA NVML under WSL2/Linux and ensures dynamic linker resolution.
 """
 
@@ -15,7 +15,7 @@ _BOOTSTRAPPED = False
 def bootstrap_cuda_env() -> None:
     """Configures LD_LIBRARY_PATH with user-space CUDA and cuDNN libraries before ORT loads."""
     global _BOOTSTRAPPED
-    if _BOOTSTRAPPED or os.environ.get("_FOUNDRY_NG_CUDA_BOOTSTRAPPED") == "1":
+    if _BOOTSTRAPPED or os.environ.get("_PRISM_CUDA_BOOTSTRAPPED") == "1":
         return
 
     home = str(Path.home())
@@ -38,7 +38,7 @@ def bootstrap_cuda_env() -> None:
     if dirs_to_add:
         new_ld = ":".join(dirs_to_add) + (":" + cur_ld if cur_ld else "")
         os.environ["LD_LIBRARY_PATH"] = new_ld
-        os.environ["_FOUNDRY_NG_CUDA_BOOTSTRAPPED"] = "1"
+        os.environ["_PRISM_CUDA_BOOTSTRAPPED"] = "1"
         _BOOTSTRAPPED = True
 
 class NvmlMemory(ctypes.Structure):

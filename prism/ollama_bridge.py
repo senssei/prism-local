@@ -1,6 +1,6 @@
 """
-foundry_ng.ollama_bridge: Integrated Ollama bridge for GGUF model execution.
-Enables foundry-ng to discover, run, and serve Ollama models alongside ONNX models.
+prism.ollama_bridge: Integrated Ollama bridge for GGUF model execution.
+Enables prism to discover, run, and serve Ollama models alongside ONNX models.
 """
 
 import json

@@ -1,12 +1,12 @@
 """
-foundry_ng.catalog: Model Discovery, Hugging Face Downloader & Metadata Resolution.
+prism.catalog: Model Discovery, Hugging Face Downloader & Metadata Resolution.
 """
 
 import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from foundry_ng.ollama_bridge import list_ollama_models
+from prism.ollama_bridge import list_ollama_models
 
 KNOWN_HF_MODELS = {
     "phi-4-mini": {

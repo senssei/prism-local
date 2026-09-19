@@ -1,5 +1,5 @@
 """
-foundry_ng.server: Standalone OpenAI-Compatible REST Server.
+prism.server: Standalone OpenAI-Compatible REST Server.
 Provides predictable static port serving (default: 5272), SSE streaming,
 and multi-engine routing between ONNX Runtime GenAI and Ollama.
 """
@@ -12,12 +12,12 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
-from foundry_ng.catalog import ModelCatalog
-from foundry_ng.engine import OnnxGenAiEngine, format_prompt
-from foundry_ng.ollama_bridge import stream_ollama_chat
-from foundry_ng.telemetry import get_gpu_info
+from prism.catalog import ModelCatalog
+from prism.engine import OnnxGenAiEngine, format_prompt
+from prism.ollama_bridge import stream_ollama_chat
+from prism.telemetry import get_gpu_info
 
-logger = logging.getLogger("foundry_ng.server")
+logger = logging.getLogger("prism.server")
 
 
 class ActiveEngineManager:
@@ -83,7 +83,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 "id": m["id"],
                 "object": "model",
                 "created": int(time.time()),
-                "owned_by": m.get("engine", "foundry-ng"),
+                "owned_by": m.get("engine", "prism"),
                 "size_mb": m.get("size_mb", 0),
                 "device": m.get("device", "GPU"),
             }
@@ -294,7 +294,7 @@ def start_server(port: int = 5272, host: str = "127.0.0.1"):
         daemon_threads = True
 
     with ThreadingTCPServer((host, port), OpenAIApiHandler) as server:
-        print(f"🚀 foundry-ng OpenAI Server active at http://{host}:{port}/v1")
+        print(f"🚀 prism OpenAI Server active at http://{host}:{port}/v1")
         print(f"   Listening for chat completions and models list.")
         print(f"   Press Ctrl+C to terminate.")
         try:

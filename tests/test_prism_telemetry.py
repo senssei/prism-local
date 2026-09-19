@@ -1,7 +1,7 @@
 import unittest
-from foundry_ng.telemetry import get_gpu_info, bootstrap_cuda_env
+from prism.telemetry import get_gpu_info, bootstrap_cuda_env
 
-class TestNgTelemetry(unittest.TestCase):
+class TestPrismTelemetry(unittest.TestCase):
     def test_bootstrap_cuda_env(self):
         bootstrap_cuda_env()
         import os

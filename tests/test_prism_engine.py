@@ -1,7 +1,7 @@
 import unittest
-from foundry_ng.engine import format_prompt
+from prism.engine import format_prompt
 
-class TestNgEngine(unittest.TestCase):
+class TestPrismEngine(unittest.TestCase):
     def test_format_prompt_phi4(self):
         messages = [
             {"role": "system", "content": "You are a helpful coding assistant."},

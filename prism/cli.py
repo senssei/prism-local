@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-foundry_ng.cli: Main Command-Line Interface for foundry-ng (fng).
+prism.cli: Main Command-Line Interface for prism.
 """
 
 import argparse
 import json
 import sys
-from foundry_ng.catalog import ModelCatalog
-from foundry_ng.chat import run_interactive_chat
-from foundry_ng.benchmark import run_benchmark
-from foundry_ng.server import start_server
-from foundry_ng.telemetry import get_gpu_info, bootstrap_cuda_env
-from foundry_ng.engine import OnnxGenAiEngine, format_prompt, OG_AVAILABLE
-from foundry_ng.ollama_bridge import is_ollama_running, stream_ollama_chat
+from prism.catalog import ModelCatalog
+from prism.chat import run_interactive_chat
+from prism.benchmark import run_benchmark
+from prism.server import start_server
+from prism.telemetry import get_gpu_info, bootstrap_cuda_env
+from prism.engine import OnnxGenAiEngine, format_prompt, OG_AVAILABLE
+from prism.ollama_bridge import is_ollama_running, stream_ollama_chat
 
 
 def cmd_status(args):
-    print("\n🖥️  FOUNDRY-NG SYSTEM & HARDWARE STATUS")
+    print("\n🖥️  PRISM SYSTEM & HARDWARE STATUS")
     print("=" * 65)
     gpu = get_gpu_info()
     if gpu.get("available"):
@@ -38,7 +38,7 @@ def cmd_status(args):
 
 def cmd_doctor(args):
     bootstrap_cuda_env()
-    print("\n🩺 FOUNDRY-NG ENVIRONMENT DOCTOR")
+    print("\n🩺 PRISM ENVIRONMENT DOCTOR")
     print("=" * 65)
     gpu = get_gpu_info()
     if gpu.get("available"):
@@ -91,7 +91,7 @@ def cmd_run(args):
     catalog = ModelCatalog()
     resolved = catalog.resolve_model(args.model)
     if not resolved:
-        print(f"❌ Model '{args.model}' not found. Run 'foundry-ng list' to inspect available models.")
+        print(f"❌ Model '{args.model}' not found. Run 'prism list' to inspect available models.")
         sys.exit(1)
 
     if resolved.get("backend") == "ollama":
@@ -124,8 +124,8 @@ def cmd_benchmark(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="foundry-ng",
-        description="foundry-ng (fng): Next-Generation Local LLM CLI & Inference Server for WSL2",
+        prog="prism",
+        description="prism: Next-Generation Multi-Engine Local AI CLI & Inference Server for WSL2/Linux",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 

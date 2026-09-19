@@ -1,5 +1,5 @@
 """
-foundry_ng.engine: Native ONNX Runtime GenAI Execution Engine on NVIDIA CUDA.
+prism.engine: Native ONNX Runtime GenAI Execution Engine on NVIDIA CUDA.
 Delivers direct GPU acceleration, streaming token generation, and clean memory lifecycle.
 """
 
@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from foundry_ng.telemetry import bootstrap_cuda_env
+from prism.telemetry import bootstrap_cuda_env
 
 # Ensure CUDA paths are set before ONNX Runtime loads
 bootstrap_cuda_env()

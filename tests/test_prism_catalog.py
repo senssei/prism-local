@@ -1,7 +1,7 @@
 import unittest
-from foundry_ng.catalog import ModelCatalog
+from prism.catalog import ModelCatalog
 
-class TestNgCatalog(unittest.TestCase):
+class TestPrismCatalog(unittest.TestCase):
     def setUp(self):
         self.catalog = ModelCatalog()
 

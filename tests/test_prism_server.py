@@ -3,9 +3,9 @@ import threading
 import time
 import unittest
 import urllib.request
-from foundry_ng.server import start_server
+from prism.server import start_server
 
-class TestNgServer(unittest.TestCase):
+class TestPrismServer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = 5289

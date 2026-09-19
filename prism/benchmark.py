@@ -1,12 +1,12 @@
 """
-foundry_ng.benchmark: Micro-Benchmark Runner for Speed, TTFT & VRAM.
+prism.benchmark: Micro-Benchmark Runner for Speed, TTFT & VRAM.
 """
 
 import time
 from typing import Dict, Any
-from foundry_ng.catalog import ModelCatalog
-from foundry_ng.engine import OnnxGenAiEngine, format_prompt
-from foundry_ng.telemetry import get_gpu_info
+from prism.catalog import ModelCatalog
+from prism.engine import OnnxGenAiEngine, format_prompt
+from prism.telemetry import get_gpu_info
 
 
 def run_benchmark(model_id_or_alias: str) -> Dict[str, Any]:
@@ -22,7 +22,7 @@ def run_benchmark(model_id_or_alias: str) -> Dict[str, Any]:
         return {"model": model_id_or_alias, "backend": "ollama"}
 
     print("=" * 60)
-    print(f" 🏎️ foundry-ng Micro-Benchmark: {resolved['name']}")
+    print(f" 🏎️  prism Micro-Benchmark: {resolved['name']}")
     print("=" * 60)
 
     print("1. Loading model into GPU VRAM...")
