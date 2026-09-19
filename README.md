@@ -1,5 +1,6 @@
 # Prism
 
+[![PyPI](https://img.shields.io/pypi/v/prism-local.svg)](https://pypi.org/project/prism-local/)
 [![CI](https://github.com/senssei/prism-local/actions/workflows/ci.yml/badge.svg)](https://github.com/senssei/prism-local/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
@@ -33,14 +34,15 @@ under WSL2, ran on the CPU, and served on a random port. Prism keeps the useful 
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[cuda,pull]"     # GPU stack (needs Python 3.11+) + huggingface_hub; both optional
+pip install "prism-local[cuda,pull]"   # GPU stack (needs Python 3.11+) + huggingface_hub; both optional
 prism doctor                       # checks NVML, ONNX Runtime GenAI, the CUDA provider, Ollama
 prism pull phi-4-mini              # downloads to ~/.prism/models
 prism run phi-4-mini "Write a Fibonacci function in Python."
 prism serve                        # http://127.0.0.1:5272/v1
 ```
 
-You can also run from a checkout without installing: `./bin/prism …`. The Python it uses comes from `$PRISM_PYTHON`, then
+Without a GPU, `pip install prism-local` is enough for CPU and Ollama use. You can also run from a checkout without
+installing: `./bin/prism …`. The Python it uses comes from `$PRISM_PYTHON`, then
 `./.venv`, then the active virtualenv, then `python3`.
 
 ```bash
@@ -113,7 +115,7 @@ it really used, and `prism doctor` shows a CUDA library mismatch.
 
 ## Known limitations
 
-- **CUDA needs matching libraries and Python 3.11+.** `pip install ".[cuda]"` installs a matched stack (ONNX Runtime GenAI, ONNX
+- **CUDA needs matching libraries and Python 3.11+.** `pip install "prism-local[cuda]"` installs a matched stack (ONNX Runtime GenAI, ONNX
   Runtime GPU and its CUDA 13 / cuDNN libraries, about 2.5 GB). If you bring your own environment, `prism doctor` names any
   missing library.
 - One ONNX model is resident at a time and requests are serialized (a lock), so this is a single-user local server, not a

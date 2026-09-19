@@ -57,7 +57,7 @@ runtime libraries are installed. Make them agree by installing the stack below.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate     # Python 3.11+
-pip install -e ".[cuda,pull]"                           # or, without Prism's extra:
+pip install "prism-local[cuda,pull]"                    # or, without Prism's extra:
 # pip install onnxruntime-genai-cuda "onnxruntime-gpu[cuda,cudnn]>=1.30"
 prism doctor                                            # expect: CUDA execution provider ... resolve
 prism benchmark phi-4-mini --device cuda

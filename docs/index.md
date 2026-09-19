@@ -13,7 +13,7 @@ Prism puts **ONNX Runtime GenAI** (CUDA or CPU) and **Ollama / llama.cpp** (GGUF
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[cuda,pull]"
+pip install "prism-local[cuda,pull]"
 prism doctor                 # is the GPU, ONNX Runtime GenAI and the CUDA provider usable?
 prism pull phi-4-mini
 prism run phi-4-mini "Write a Fibonacci function in Python."

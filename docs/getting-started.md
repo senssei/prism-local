@@ -10,8 +10,11 @@
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[cuda,pull]"
+pip install "prism-local[cuda,pull]"
 ```
+
+The package is on [PyPI](https://pypi.org/project/prism-local/). Plain `pip install prism-local` (no extras) is enough for
+CPU inference or Ollama-only use, and installs nothing else.
 
 | Extra | Installs | Needed for |
 |---|---|---|
@@ -21,6 +24,13 @@ pip install -e ".[cuda,pull]"
 | `docs` | `mkdocs-material` | building this site |
 
 Without the `cuda` extra you can still use the CPU build of `onnxruntime-genai`, or only Ollama models.
+
+### From source
+
+```bash
+git clone https://github.com/senssei/prism-local && cd prism-local
+pip install -e ".[cuda,pull]"
+```
 
 ### Running from a checkout without installing
 
