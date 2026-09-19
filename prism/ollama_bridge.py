@@ -20,12 +20,10 @@ def is_ollama_running(base_url: str = OLLAMA_BASE_URL) -> bool:
         return False
 
 def list_ollama_models(base_url: str = OLLAMA_BASE_URL) -> List[Dict[str, Any]]:
-    """Retrieves list of installed Ollama models."""
-    if not is_ollama_running(base_url):
-        return []
+    """Retrieves list of installed Ollama models (empty if the daemon is unreachable)."""
     try:
         req = urllib.request.Request(f"{base_url}/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             models = []
             for m in data.get("models", []):

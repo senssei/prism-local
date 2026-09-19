@@ -8,3 +8,7 @@ htmlcov/
 *~
 .DS_Store
 .venv/
+.cursor/
+*.egg-info/
+build/
+dist/

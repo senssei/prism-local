@@ -67,7 +67,7 @@ def run_interactive_chat(model_id_or_alias: str):
                     full_response += chunk
                     token_count += 1
             else:
-                prompt = format_prompt(history)
+                prompt = format_prompt(history, resolved.get("template"))
                 for token, is_first, speed in engine.stream_generate(prompt=prompt, max_tokens=1024):
                     print(token, end="", flush=True)
                     full_response += token

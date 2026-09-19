@@ -8,9 +8,10 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple
 
 from prism.telemetry import bootstrap_cuda_env
+from prism.templates import format_prompt  # noqa: F401  (re-exported for callers)
 
 # Ensure CUDA paths are set before ONNX Runtime loads
 bootstrap_cuda_env()
@@ -23,41 +24,22 @@ except ImportError:
     OG_AVAILABLE = False
 
 
-def format_prompt(messages: List[Dict[str, str]], template: str = "phi4") -> str:
-    """Formats a list of OpenAI-style messages into the appropriate prompt format."""
-    system_msg = ""
-    turns: List[Tuple[str, str]] = []
+class Engine(Protocol):
+    """What the server, chat and MCP layers need from an inference engine."""
 
-    for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        if role == "system":
-            system_msg = content
-        else:
-            turns.append((role, content))
+    last_finish_reason: str
 
-    if template in ["phi4", "phi3"]:
-        out = ""
-        if system_msg:
-            out += f"<|system|>\n{system_msg}<|end|>\n"
-        for role, content in turns:
-            out += f"<|{role}|>\n{content}<|end|>\n"
-        out += "<|assistant|>\n"
-        return out
-    elif template == "chatml":
-        out = ""
-        if system_msg:
-            out += f"<|im_start|>system\n{system_msg}<|im_end|>\n"
-        for role, content in turns:
-            out += f"<|im_start|>{role}\n{content}<|im_end|>\n"
-        out += "<|im_start|>assistant\n"
-        return out
-    else:
-        out = f"System: {system_msg}\n\n" if system_msg else ""
-        for role, content in turns:
-            out += f"{role.capitalize()}: {content}\n"
-        out += "Assistant: "
-        return out
+    def count_tokens(self, text: str) -> int: ...
+
+    def generate(
+        self, prompt: str, max_tokens: int = ..., temperature: float = ..., top_p: float = ...
+    ) -> Dict[str, Any]: ...
+
+    def stream_generate(
+        self, prompt: str, max_tokens: int = ..., temperature: float = ..., top_p: float = ...
+    ) -> Iterator[Tuple[str, bool, float]]: ...
+
+    def unload(self) -> None: ...
 
 
 class OnnxGenAiEngine:
@@ -73,6 +55,8 @@ class OnnxGenAiEngine:
 
         self._model = None
         self._tokenizer = None
+        # "stop" (EOS) or "length" (hit max_tokens) for the most recent completed generation.
+        self.last_finish_reason = "stop"
         self._load_model()
 
     def _load_model(self):
@@ -82,6 +66,12 @@ class OnnxGenAiEngine:
             self._tokenizer = og.Tokenizer(self._model)
         except Exception as ex:
             raise RuntimeError(f"Failed to load ONNX model at {self.model_path}: {ex}")
+
+    def count_tokens(self, text: str) -> int:
+        """Returns the number of tokens `text` encodes to."""
+        if not self._tokenizer:
+            raise RuntimeError("Model is not loaded.")
+        return len(self._tokenizer.encode(text))
 
     def generate(
         self,
@@ -111,6 +101,7 @@ class OnnxGenAiEngine:
 
         return {
             "text": "".join(tokens),
+            "finish_reason": self.last_finish_reason,
             "tokens_generated": token_count,
             "ttft_sec": round(ttft, 4),
             "elapsed_sec": round(total_time, 3),
@@ -148,6 +139,7 @@ class OnnxGenAiEngine:
         generator.append_tokens(input_tokens)
         tokenizer_stream = self._tokenizer.create_stream()
 
+        self.last_finish_reason = "stop"
         first = True
         count = 0
         t_start = time.perf_counter()
@@ -163,6 +155,8 @@ class OnnxGenAiEngine:
                     speed = count / elapsed
                     yield text, first, speed
                     first = False
+            if count >= max_tokens:
+                self.last_finish_reason = "length"
         finally:
             del generator
             del params

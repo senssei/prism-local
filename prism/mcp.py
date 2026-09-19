@@ -19,6 +19,13 @@ from prism.telemetry import get_gpu_info
 PRISM_DEFAULT_URL = os.environ.get("PRISM_BASE_URL", "http://localhost:5272/v1")
 
 
+def _auth_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    key = os.environ.get("PRISM_API_KEY")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
 def call_prism_server(
     prompt: str,
     model: Optional[str] = None,
@@ -55,7 +62,7 @@ def call_prism_server(
         req = urllib.request.Request(
             f"{base_url.rstrip('/')}/chat/completions",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=_auth_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=180) as resp:
@@ -75,15 +82,21 @@ def call_prism_server(
                 f"{tok_count} tokens generated | Zero Cloud Cost]"
             )
             return f"{reply}{telemetry}"
+    except urllib.error.HTTPError as http_ex:
+        detail = http_ex.read().decode("utf-8", "replace")[:300]
+        return f"Error: Prism server responded {http_ex.code}: {detail}"
     except urllib.error.URLError:
         # Fallback to direct engine generation if server is offline
-        resolved = catalog.resolve_model(model)
+        try:
+            resolved = catalog.resolve_model(model)
+        except ValueError as ex:  # AmbiguousModelError
+            return f"Error: {ex}"
         if resolved and resolved.get("backend") == "onnx":
             try:
                 from prism.engine import OnnxGenAiEngine, format_prompt
                 engine = OnnxGenAiEngine(resolved["path"])
                 try:
-                    formatted = format_prompt(messages)
+                    formatted = format_prompt(messages, resolved.get("template"))
                     gen_res = engine.generate(formatted, max_tokens=opts.get("max_tokens", 1024))
                     elapsed = time.perf_counter() - t0
                     telemetry = (

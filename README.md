@@ -24,13 +24,38 @@ Prism replaces fragile single-engine tools with an open, multi-engine local runt
 | **Model Ecosystem** | ❌ Microsoft catalog with 0 CUDA variants | 🟢 Pulls official ONNX weights from HF & GGUF from Ollama |
 | **IDE & Agent Connectors**| ❌ None | 🟢 **Native Cursor, Cline, and MCP connectors** |
 | **VRAM Lifecycle** | ❌ Leaks ~99% VRAM on unload (Issue #1079) | 🟢 Complete GPU memory disposal on unload |
-| **Compatibility Aliases** | N/A | 🟢 Fully accessible via `prism`, `fng`, or `foundry-ng` |
+| **Compatibility Aliases** | N/A | 🟡 `fng` / `foundry-ng` kept as deprecated aliases of `prism` |
 
 ---
 
+## 📦 Installation
+
+Prism has no runtime dependencies; the engines are optional extras.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[cuda,pull]"   # ONNX Runtime GenAI (CUDA) + Hugging Face downloads
+prism doctor
+```
+
+Or run straight from a checkout with [`./bin/prism`](bin/prism) (no install needed). It picks its Python from `$PRISM_PYTHON`, then `./.venv`, then the active virtualenv, then `python3`.
+
+### Configuration
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `PRISM_MODEL_DIRS` | `:`-separated directories to scan for ONNX models. The first one is where `prism pull` writes. | `~/.prism/models` |
+| `PRISM_PYTHON` | Interpreter used by `bin/prism` | see above |
+| `PRISM_API_KEY` | Bearer token for `prism serve`; also sent by the MCP client and connector probe | unset (no auth) |
+| `PRISM_BASE_URL` | Server URL used by `prism mcp` | `http://localhost:5272/v1` |
+
+Models are also discovered in the Foundry Local cache (`~/.foundry/cache/models`). CUDA and cuDNN libraries installed as pip `nvidia-*` wheels are found automatically in the active environment's site-packages and preloaded before ONNX Runtime starts.
+
+> **Migrating:** earlier versions scanned `./models` and a sibling `../02-ollama-loadtest` checkout, and `bin/prism` used that checkout's virtualenv. Set `PRISM_MODEL_DIRS` and `PRISM_PYTHON` to keep using them.
+
 ## 🚀 Quickstart
 
-The launcher script is located at [`./bin/prism`](bin/prism) (with backward-compatible symlinks [`./bin/fng`](bin/fng) and [`./bin/foundry-ng`](bin/foundry-ng)).
+The launcher script is [`./bin/prism`](bin/prism). The old names [`./bin/fng`](bin/fng) and [`./bin/foundry-ng`](bin/foundry-ng) still work but are deprecated and print a notice.
 
 ```bash
 # Add bin to PATH (optional):
@@ -54,7 +79,7 @@ prism run ollama:qwen2.5-coder:7b "Explain quicksort in two sentences."
 # 6. Interactive Streaming Terminal Chat
 prism chat Phi-4-mini-instruct-cuda-gpu
 
-# 7. Start the OpenAI-Compatible REST Server
+# 7. Start the OpenAI-Compatible REST Server (binds to 127.0.0.1 by default)
 prism serve --port 5272
 ```
 
@@ -134,7 +159,18 @@ prism pull deepseek-r1:14b --backend ollama
 
 ## 📡 OpenAI-Compatible REST API
 
-`prism serve` provides a high-throughput, multi-threaded REST server running on a predictable static port (default `5272` on `0.0.0.0` for WSL2/Windows host reachability).
+`prism serve` provides a multi-threaded REST server on a predictable static port (default `127.0.0.1:5272`). Inference is serialized behind a lock, so concurrent requests queue rather than crash the engine.
+
+**Security defaults:** the server binds to loopback only, rejects non-loopback `Host` headers (DNS-rebinding defence), sends no CORS headers, and caps request bodies at 10 MB. To expose it or call it from a browser:
+
+```bash
+# Listen on all interfaces, require a bearer token (also read from $PRISM_API_KEY)
+prism serve --host 0.0.0.0 --api-key "$(openssl rand -hex 16)"
+
+# Allow a specific browser origin (repeatable; '*' allows any)
+prism serve --cors-origin http://localhost:3000
+```
+`/health` stays unauthenticated for liveness probes. Chat templates (Phi, ChatML/Qwen, Llama 3, DeepSeek) are chosen per model from its name and `genai_config.json`; unknown families fall back to ChatML.
 
 ### 1. List Available Models across Both Engines
 ```bash
@@ -195,9 +231,23 @@ prism benchmark Phi-4-mini-instruct-cuda-gpu
 
 ---
 
+## 🗄️ Legacy: `foundry_wsl`
+
+[`foundry_wsl/`](foundry_wsl/) is the earlier WSL2 bridge toolkit (doctor, cache injector, Windows-host proxy) from the original Foundry Local evaluation. It is kept as-is, is not part of the installable `prism-local` package, and is run from a checkout (`python -m foundry_wsl.cli`). New work goes into `prism/`.
+
+---
+
 ## 🧪 Running the Test Suite
 
 ```bash
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
-All **28 automated unit tests** verify NVML hardware detection, multi-engine catalog resolution, model pulling, prompt formatting, REST server endpoints, SSE streaming, MCP JSON-RPC protocol handshake, and Cursor/Cline connectors.
+
+The suite (about 100 tests, ~6 s) needs no GPU, Ollama, network, or models: the server is exercised through a fake engine on an ephemeral port, `OnnxGenAiEngine` against a fake `onnxruntime_genai`, and `pull` against a fake `huggingface_hub`. It covers chat templates, model resolution and caching, OpenAI response and SSE framing, error JSON, auth/CORS/Host checks, engine serialization, client-disconnect cancellation, Ollama routing, CLI argument handling, connectors, and the MCP handshake. GitHub Actions runs it on Python 3.10–3.12 and smoke-tests the built wheel (`.github/workflows/ci.yml`).
+
+Two real-hardware smoke tests (`tests/test_prism_gpu_integration.py`) skip automatically unless `onnxruntime_genai`, an NVIDIA GPU, and a CUDA model are all present:
+
+```bash
+export PRISM_PYTHON=/path/to/venv/bin/python3 PRISM_MODEL_DIRS=/path/to/models
+PYTHONPATH=. "$PRISM_PYTHON" -m unittest tests.test_prism_gpu_integration -v
+```

@@ -1,22 +1,30 @@
 #!/usr/bin/env bash
 #
-# prism: Next-Generation Multi-Engine Local AI CLI & Inference Server for Linux & WSL2
+# prism: Multi-engine local AI CLI & OpenAI-compatible server for Linux & WSL2
+# (ONNX Runtime GenAI on NVIDIA CUDA, Ollama/llama.cpp GGUF).
 #
-# Refracts disparate local runtimes (ONNX Runtime GenAI on NVIDIA CUDA, Ollama/llama.cpp GGUF)
-# into a unified developer CLI, interactive terminal chat, benchmark suite, and OpenAI-compatible REST server.
+# Python selection: $PRISM_PYTHON, then ./.venv in this checkout, then the active
+# virtualenv, then python3 on PATH.
 #
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Select Python environment with onnxruntime_genai installed
-if [ -f "$SCRIPT_DIR/../02-ollama-loadtest/.venv/bin/python3" ]; then
-    PYTHON="$SCRIPT_DIR/../02-ollama-loadtest/.venv/bin/python3"
-elif [ -f "$SCRIPT_DIR/.venv/bin/python3" ]; then
+case "$(basename "$0")" in
+    fng|foundry-ng)
+        echo "note: '$(basename "$0")' is a deprecated alias; use 'prism'." >&2
+        ;;
+esac
+
+if [ -n "${PRISM_PYTHON:-}" ]; then
+    PYTHON="$PRISM_PYTHON"
+elif [ -x "$SCRIPT_DIR/.venv/bin/python3" ]; then
     PYTHON="$SCRIPT_DIR/.venv/bin/python3"
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python3" ]; then
+    PYTHON="$VIRTUAL_ENV/bin/python3"
 else
-    PYTHON="$(which python3)"
+    PYTHON="$(command -v python3)"
 fi
 
 export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"

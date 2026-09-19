@@ -32,7 +32,8 @@ def _get_prism_bin_path() -> str:
 def test_prism_server_connection(base_url: str = "http://localhost:5272/v1") -> bool:
     """Tests if the Prism OpenAI REST server is responding."""
     try:
-        req = urllib.request.Request(f"{base_url.rstrip('/')}/models", method="GET")
+        headers = {"Authorization": f"Bearer {os.environ['PRISM_API_KEY']}"} if os.environ.get("PRISM_API_KEY") else {}
+        req = urllib.request.Request(f"{base_url.rstrip('/')}/models", headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=2.0) as resp:
             return resp.status == 200
     except Exception:

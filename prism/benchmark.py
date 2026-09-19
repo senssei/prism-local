@@ -37,13 +37,13 @@ def run_benchmark(model_id_or_alias: str) -> Dict[str, Any]:
 
     # Warmup
     print("2. Running warmup run (32 tokens)...")
-    warmup_prompt = format_prompt([{"role": "user", "content": "Count from 1 to 5."}])
+    warmup_prompt = format_prompt([{"role": "user", "content": "Count from 1 to 5."}], resolved.get("template"))
     engine.generate(warmup_prompt, max_tokens=32)
 
     # Benchmark run: 256 tokens code generation
     test_prompt = format_prompt([
         {"role": "user", "content": "Write a complete Python implementation of an LRU Cache with get and put methods."}
-    ])
+    ], resolved.get("template"))
 
     print("3. Executing benchmark generation (target 256 tokens)...")
     t0 = time.perf_counter()

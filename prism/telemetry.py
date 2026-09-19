@@ -6,40 +6,95 @@ Directly probes NVIDIA NVML under WSL2/Linux and ensures dynamic linker resoluti
 import ctypes
 import glob
 import os
+import site
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 _BOOTSTRAPPED = False
 
+WSL_LIB_DIR = "/usr/lib/wsl/lib"
+
+# Load order matters a little: cuDNN and cuBLAS depend on the CUDA runtime.
+_NVIDIA_LIB_PREFIXES = (
+    "libcudart", "libcublasLt", "libcublas", "libcurand", "libcufft", "libnvrtc", "libcudnn",
+)
+
+
+def _site_package_dirs() -> List[str]:
+    """Absolute site-packages style directories for the running interpreter (venv, user, system)."""
+    candidates: List[str] = []
+    try:
+        candidates.extend(site.getsitepackages())
+    except AttributeError:  # some old virtualenv builds lack getsitepackages
+        pass
+    try:
+        candidates.append(site.getusersitepackages())
+    except AttributeError:
+        pass
+    candidates.extend(p for p in sys.path if p)
+    seen = set()
+    result: List[str] = []
+    for path in candidates:
+        if os.path.isabs(path) and path not in seen and os.path.isdir(path):
+            seen.add(path)
+            result.append(path)
+    return result
+
+
+def find_nvidia_lib_dirs() -> List[str]:
+    """Finds `nvidia/<pkg>/lib` directories shipped by the pip `nvidia-*-cu12` wheels."""
+    dirs: List[str] = []
+    for sp in _site_package_dirs():
+        for lib_dir in sorted(glob.glob(os.path.join(sp, "nvidia", "*", "lib"))):
+            if lib_dir not in dirs:
+                dirs.append(lib_dir)
+    return dirs
+
+
+def _preload_cuda_libs(lib_dirs: List[str]) -> List[str]:
+    """
+    dlopen()s the pip-installed CUDA libraries with RTLD_GLOBAL so ONNX Runtime's CUDA provider
+    can resolve them by soname. Changing LD_LIBRARY_PATH after the interpreter starts does not
+    affect this process's own dlopen search path, so preloading is what actually makes them visible.
+    Returns the paths that were loaded.
+    """
+    loaded: List[str] = []
+    for prefix in _NVIDIA_LIB_PREFIXES:
+        for lib_dir in lib_dirs:
+            matches = sorted(glob.glob(os.path.join(lib_dir, f"{prefix}.so*")))
+            if not matches:
+                continue
+            try:
+                ctypes.CDLL(matches[0], mode=ctypes.RTLD_GLOBAL)
+                loaded.append(matches[0])
+                break
+            except OSError:
+                continue
+    return loaded
+
+
 def bootstrap_cuda_env() -> None:
-    """Configures LD_LIBRARY_PATH with user-space CUDA and cuDNN libraries before ORT loads."""
+    """
+    Makes user-space CUDA/cuDNN wheels visible before ORT loads: preloads them into this process and
+    prepends their directories to LD_LIBRARY_PATH (which only helps child processes such as `prism mcp`).
+    A no-op when no `nvidia/*/lib` directories exist.
+    """
     global _BOOTSTRAPPED
-    if _BOOTSTRAPPED or os.environ.get("_PRISM_CUDA_BOOTSTRAPPED") == "1":
+    if _BOOTSTRAPPED:
         return
+    _BOOTSTRAPPED = True
 
-    home = str(Path.home())
-    candidate_dirs = [
-        "/usr/lib/wsl/lib",
-        f"{home}/.local/lib/python3.12/site-packages/nvidia/cublas/lib",
-        f"{home}/.local/lib/python3.12/site-packages/nvidia/cudnn/lib",
-        f"{home}/.local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib",
-        f"{home}/.local/lib/python3.12/site-packages/nvidia/curand/lib",
-        f"{home}/.local/lib/python3.12/site-packages/nvidia/cufft/lib",
-        f"{home}/.local/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib",
-        f"{home}/02-ollama-loadtest/.venv/lib/python3.12/site-packages/nvidia/cublas/lib",
-        f"{home}/02-ollama-loadtest/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib",
-    ]
+    lib_dirs = find_nvidia_lib_dirs()
+    if os.path.isdir(WSL_LIB_DIR):
+        lib_dirs.insert(0, WSL_LIB_DIR)
 
-    existing_dirs = [d for d in candidate_dirs if os.path.isdir(d)]
     cur_ld = os.environ.get("LD_LIBRARY_PATH", "")
-
-    dirs_to_add = [d for d in existing_dirs if d not in cur_ld.split(":")]
+    dirs_to_add = [d for d in lib_dirs if d not in cur_ld.split(":")]
     if dirs_to_add:
-        new_ld = ":".join(dirs_to_add) + (":" + cur_ld if cur_ld else "")
-        os.environ["LD_LIBRARY_PATH"] = new_ld
-        os.environ["_PRISM_CUDA_BOOTSTRAPPED"] = "1"
-        _BOOTSTRAPPED = True
+        os.environ["LD_LIBRARY_PATH"] = ":".join(dirs_to_add + ([cur_ld] if cur_ld else []))
+
+    _preload_cuda_libs([d for d in lib_dirs if d != WSL_LIB_DIR])
 
 class NvmlMemory(ctypes.Structure):
     _fields_ = [

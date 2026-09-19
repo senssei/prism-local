@@ -5,9 +5,10 @@ prism.cli: Main Command-Line Interface for prism.
 
 import argparse
 import json
+import os
 import sys
 
-from prism.catalog import ModelCatalog
+from prism.catalog import AmbiguousModelError, ModelCatalog
 from prism.chat import run_interactive_chat
 from prism.benchmark import run_benchmark
 from prism.server import start_server
@@ -112,7 +113,7 @@ def cmd_run(args):
         print()
     else:
         engine = OnnxGenAiEngine(resolved["path"])
-        formatted = format_prompt([{"role": "user", "content": prompt}])
+        formatted = format_prompt([{"role": "user", "content": prompt}], resolved.get("template"))
         try:
             for token, _, _ in engine.stream_generate(formatted, max_tokens=args.max_tokens):
                 print(token, end="", flush=True)
@@ -126,7 +127,12 @@ def cmd_chat(args):
 
 
 def cmd_serve(args):
-    start_server(port=args.port, host=args.host)
+    start_server(
+        port=args.port,
+        host=args.host,
+        api_key=args.api_key or os.environ.get("PRISM_API_KEY") or None,
+        cors_origins=args.cors_origin,
+    )
 
 
 def cmd_benchmark(args):
@@ -186,7 +192,7 @@ def main():
     # pull
     p_pull = subparsers.add_parser("pull", help="Download ONNX models (Hugging Face) or GGUF models (Ollama)")
     p_pull.add_argument("model", help="Model name, alias, or Hugging Face repo ID (e.g. phi-4-mini, ollama:qwen2.5-coder:7b)")
-    p_pull.add_argument("--output-dir", default="models", help="Destination folder (default: models)")
+    p_pull.add_argument("--output-dir", default=None, help="Destination folder (default: first $PRISM_MODEL_DIRS entry, else ~/.prism/models)")
     p_pull.add_argument("--ep", choices=["cuda", "cpu"], default=None, help="Target execution provider (default: auto-detect)")
     p_pull.add_argument("--quant", choices=["int4", "fp16"], default="int4", help="Quantization level (default: int4)")
     p_pull.add_argument("--backend", choices=["auto", "onnx", "ollama"], default="auto", help="Inference backend (default: auto)")
@@ -207,7 +213,9 @@ def main():
     # serve
     p_serve = subparsers.add_parser("serve", help="Launch OpenAI-compatible REST server")
     p_serve.add_argument("--port", type=int, default=5272, help="Port to listen on (default: 5272)")
-    p_serve.add_argument("--host", default="0.0.0.0", help="Host interface (default: 0.0.0.0)")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Host interface (default: 127.0.0.1; use 0.0.0.0 to expose on the network, ideally with --api-key)")
+    p_serve.add_argument("--api-key", default=None, help="Require 'Authorization: Bearer <key>' (default: $PRISM_API_KEY)")
+    p_serve.add_argument("--cors-origin", action="append", default=[], metavar="ORIGIN", help="Allow a browser origin (repeatable, or '*'); CORS is off by default")
     p_serve.set_defaults(func=cmd_serve)
 
     # benchmark
@@ -249,7 +257,11 @@ def main():
     if not hasattr(args, "func"):
         parser.print_help()
         sys.exit(1)
-    args.func(args)
+    try:
+        args.func(args)
+    except AmbiguousModelError as ex:
+        print(f"❌ {ex}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
