@@ -43,14 +43,31 @@ time:
 
 ```text
 ✅ ONNX Runtime GenAI: Installed.
-❌ CUDA execution provider: cannot load: libcublasLt.so.13: cannot open shared object file: No such file or directory
+❌ CUDA execution provider: cannot load: missing shared libraries: libcublas.so.13, libcublasLt.so.13, libcudart.so.13
    Models will fall back to CPU. Install CUDA libraries matching your onnxruntime-genai build.
 ```
 
-The typical cause is a **build/library mismatch**: an `onnxruntime-genai-cuda` wheel built for one major CUDA version while
-only another version's runtime libraries (for example the `nvidia-*-cu12` wheels) are installed. Make them agree: either
-install the runtime libraries for the CUDA version your wheel targets, or install a wheel built for the CUDA version you have.
-Check the `onnxruntime-genai` release notes for which CUDA version each release targets.
+The check runs `ldd` on ONNX Runtime's CUDA provider library, so it reports unresolved dependencies without running any of
+the library's code. (Loading that library outside ONNX Runtime can crash the process, so Prism deliberately does not try.)
+
+The typical cause is a **build/library mismatch**: a wheel built for one major CUDA version while only another version's
+runtime libraries are installed. Make them agree by installing the stack below.
+
+## A known-good CUDA setup
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate     # Python 3.11+
+pip install -e ".[cuda,pull]"                           # or, without Prism's extra:
+# pip install onnxruntime-genai-cuda "onnxruntime-gpu[cuda,cudnn]>=1.30"
+prism doctor                                            # expect: CUDA execution provider ... resolve
+prism benchmark phi-4-mini --device cuda
+```
+
+Verified 2026-09-19 with `onnxruntime-genai-cuda 0.16.0`, `onnxruntime-gpu 1.30.0` (a **CUDA 13** build), `nvidia-cublas 13.8`,
+`nvidia-cudnn-cu13 9.26` and an NVIDIA driver reporting CUDA 13.4. A different `onnxruntime-genai` release may target a
+different CUDA major version; ONNX Runtime GPU's `cuda` and `cudnn` extras pull the libraries that match it.
+
+`bin/prism` uses `./.venv` automatically when it exists.
 
 ### How Prism finds CUDA libraries
 
@@ -72,5 +89,6 @@ and `libnvidia-ml`) is added to `LD_LIBRARY_PATH` for child processes such as th
 prism benchmark phi-4-mini
 ```
 
-Look for `Execution provider: CUDA` and a VRAM increase on the order of the model size. A model that "ran on GPU" but added
-almost no VRAM and decoded at single-digit tokens per second was running on the CPU.
+Look for `Execution provider: CUDA` and a VRAM increase on the order of the model size. On the reference machine a CUDA run added about 4.5 GB
+of VRAM and decoded at 79–98 tok/s. A model that "ran on GPU" but added almost no VRAM and decoded at single-digit tokens per
+second was running on the CPU.

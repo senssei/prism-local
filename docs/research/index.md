@@ -12,7 +12,6 @@ apart from the notes marked below.
 | [Legacy `foundry_wsl` toolkit](../legacy-foundry-wsl.md) | The first tooling built from these findings |
 
 !!! warning "Reproducibility"
-    The CUDA throughput figures for Prism in these documents (for example 118–130 tok/s) were captured with the CUDA execution
-    provider active. They have **not been reproduced** since the machine's ONNX Runtime GenAI build and CUDA libraries stopped
-    matching; CPU inference measured about 8 tok/s. See the note at the top of the [evaluation](evaluation-report.md). Measure your
-    own hardware with `prism benchmark`.
+    The CUDA figures for Prism in these documents (for example 118–130 tok/s) were captured with the CUDA provider active and
+    have **not been reproduced exactly**. A re-measurement on 2026-09-19 gave 79–98 tok/s on CUDA versus 7–9 tok/s on CPU. See
+    the note at the top of the [evaluation](evaluation-report.md). Measure your own hardware with `prism benchmark`.

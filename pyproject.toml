@@ -26,8 +26,9 @@ dynamic = ["version"]
 dependencies = []
 
 [project.optional-dependencies]
-# ONNX Runtime GenAI with CUDA. The CUDA runtime libraries it needs must match its build (see `prism doctor`).
-cuda = ["onnxruntime-genai-cuda"]
+# ONNX Runtime GenAI on CUDA, plus the matching CUDA/cuDNN runtime libraries (ONNX Runtime's own `cuda` and `cudnn`
+# extras). Needs Python >= 3.11 because onnxruntime-gpu does. Verify with `prism doctor`.
+cuda = ["onnxruntime-genai-cuda", "onnxruntime-gpu[cuda,cudnn]>=1.30"]
 # `prism pull` for Hugging Face ONNX models.
 pull = ["huggingface_hub"]
 dev = ["pytest"]

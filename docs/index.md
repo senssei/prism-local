@@ -39,7 +39,7 @@ findings shaped Prism.
 
 ## Known limitations
 
-- **CUDA setup is yours to get right.** The `onnxruntime-genai-cuda` build must match the installed CUDA libraries;
+- **CUDA needs matching libraries and Python 3.11+.** The `cuda` extra installs a matched stack; if you bring your own,
   [`prism doctor`](devices.md#diagnosing-cuda-problems) tells you what is missing.
 - One ONNX model is resident at a time and requests are serialized, so this is a single-user local server.
 - No stop sequences, embeddings or tool calling on the chat endpoint yet.

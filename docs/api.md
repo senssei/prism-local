@@ -62,7 +62,7 @@ Non-streaming responses follow the OpenAI shape. `finish_reason` is `stop` (end 
 and `usage` uses the model tokenizer. Ollama responses have no `usage`. ONNX responses add a Prism extension:
 
 ```json
-"telemetry": { "ttft_sec": 0.06, "decode_tok_per_sec": 118.6, "device": "cuda" }
+"telemetry": { "ttft_sec": 0.45, "decode_tok_per_sec": 85.2, "device": "cuda" }
 ```
 
 Streaming sends `chat.completion.chunk` events: a first chunk with `delta: {"role": "assistant"}`, content deltas, a final chunk

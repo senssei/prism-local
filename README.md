@@ -33,7 +33,7 @@ under WSL2, ran on the CPU, and served on a random port. Prism keeps the useful 
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[cuda,pull]"     # onnxruntime-genai-cuda + huggingface_hub (both optional)
+pip install -e ".[cuda,pull]"     # GPU stack (needs Python 3.11+) + huggingface_hub; both optional
 prism doctor                       # checks NVML, ONNX Runtime GenAI, the CUDA provider, Ollama
 prism pull phi-4-mini              # downloads to ~/.prism/models
 prism run phi-4-mini "Write a Fibonacci function in Python."
@@ -97,16 +97,25 @@ See [Integrations](docs/integrations.md).
 
 ## Performance
 
-Speed depends almost entirely on which execution provider runs. In our September 2026 evaluation on an RTX 5070,
-Phi-4-mini INT4 decoded at roughly **118–130 tok/s on CUDA** versus **~8–15 tok/s on CPU**. Those CUDA figures are
-**historical**: they have not been reproduced since the environment changed (see the
-[reproducibility note](docs/research/evaluation-report.md)). Use `prism benchmark <model>` on your own machine; it prints the
-provider it really used, and a CUDA build/library mismatch shows up in `prism doctor`.
+Speed depends almost entirely on which execution provider runs. Measured with `prism benchmark` on 2026-09-19 (RTX 5070
+12 GB, WSL2, driver 615.71, Phi-4-mini INT4, `onnxruntime-genai-cuda 0.16.0`, `onnxruntime-gpu 1.30.0`, CUDA 13 libraries,
+two runs each):
+
+| | Decode | Time to first token | VRAM added by the model |
+|---|---|---|---|
+| **CUDA** | 79–98 tok/s | 0.45–0.50 s | ~4.5 GB (released on unload) |
+| CPU | 7–9 tok/s | ~0.6 s | none |
+
+Earlier evaluation figures of 118–130 tok/s and a ~56 ms TTFT (see the
+[reproducibility note](docs/research/evaluation-report.md)) were **not reproduced**; the GPU here was shared with about 6.7 GB
+of other applications and the prompt differs. Measure your own machine with `prism benchmark <model>`; it prints the provider
+it really used, and `prism doctor` shows a CUDA library mismatch.
 
 ## Known limitations
 
-- **CUDA setup is on you.** The `onnxruntime-genai-cuda` wheel must match the CUDA libraries installed (a CUDA 13 build
-  needs CUDA 13 libraries). `prism doctor` tells you exactly which library is missing.
+- **CUDA needs matching libraries and Python 3.11+.** `pip install ".[cuda]"` installs a matched stack (ONNX Runtime GenAI, ONNX
+  Runtime GPU and its CUDA 13 / cuDNN libraries, about 2.5 GB). If you bring your own environment, `prism doctor` names any
+  missing library.
 - One ONNX model is resident at a time and requests are serialized (a lock), so this is a single-user local server, not a
   high-concurrency one.
 - No stop sequences, embeddings, or tool calling on `/v1/chat/completions` yet.

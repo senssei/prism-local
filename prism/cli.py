@@ -55,7 +55,7 @@ def cmd_doctor(args):
         if not cuda["checked"]:
             print(f"ℹ️ CUDA execution provider: not checked ({cuda['reason']}); models will run on CPU.")
         elif cuda["loadable"]:
-            print("✅ CUDA execution provider: loads; GPU inference is available (--device cuda).")
+            print("✅ CUDA execution provider: all CUDA libraries resolve; GPU inference is available (--device cuda).")
         else:
             print(f"❌ CUDA execution provider: cannot load: {cuda['error']}")
             print("   Models will fall back to CPU. Install CUDA libraries matching your onnxruntime-genai build.")

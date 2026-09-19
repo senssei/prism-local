@@ -6,12 +6,17 @@
 **Environment**: WSL2 Ubuntu 24.04.5 LTS (Linux Kernel 6.6.87.2-microsoft-standard-WSL2)  
 **Date**: September 2026  
 
-> **Reproducibility note (2026-09-19).** The CUDA figures for Prism in this report (for example 118–130 tok/s) came from a
-> harness that selects the ONNX Runtime CUDA execution provider explicitly. When re-checked on 2026-09-19 the same machine had
-> `onnxruntime-genai-cuda 0.16.0`, a CUDA 13 build, alongside CUDA 12 runtime libraries only, so the CUDA provider failed to
-> load and inference silently ran on the CPU at about 8 tok/s. Prism's own engine did not select a provider before v0.1.0 and
-> reported such runs as GPU; that is fixed (`--device`, `prism doctor`, and the device now reported by `benchmark` and `/health`).
-> Treat the CUDA numbers as historical until they are re-measured with CUDA libraries that match the installed build.
+> **Reproducibility note (2026-09-19).** The CUDA figures for Prism in this report (for example 118–130 tok/s, ~56 ms TTFT)
+> came from a harness that selects the ONNX Runtime CUDA execution provider explicitly. When re-checked on 2026-09-19 the same
+> machine had `onnxruntime-genai-cuda 0.16.0`, a CUDA 13 build, alongside CUDA 12 runtime libraries only, so the CUDA provider
+> failed to load and inference silently ran on the CPU at about 8 tok/s. Prism's own engine did not select a provider before
+> v0.1.0 and reported such runs as GPU; that is fixed (`--device`, `prism doctor`, and the device now reported by `benchmark` and
+> `/health`).
+>
+> After installing the matching CUDA 13 libraries, `prism benchmark` on the same machine measured **79–98 tok/s decode and
+> 0.45–0.50 s TTFT on CUDA** (about 4.5 GB VRAM, released on unload) versus 7–9 tok/s on CPU. That confirms the large GPU
+> speed-up but **does not reproduce** the 118–130 tok/s and ~56 ms figures below; the GPU was shared with about 6.7 GB of other
+> applications and the benchmark prompt differs. Treat the figures below as this report's original measurements.
 
 ---
 

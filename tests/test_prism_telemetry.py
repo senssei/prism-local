@@ -62,11 +62,37 @@ class TestPrismTelemetry(unittest.TestCase):
         spec = type("Spec", (), {"submodule_search_locations": [os.path.join(self.tmp, "onnxruntime")]})()
         return patch("prism.telemetry.importlib.util.find_spec", return_value=spec)
 
-    def test_probe_cuda_provider_reports_the_missing_library(self):
-        with self._fake_onnxruntime(), patch.object(telemetry, "bootstrap_cuda_env"):
+    @staticmethod
+    def _ldd(stdout):
+        return patch("prism.telemetry.subprocess.run",
+                     return_value=type("R", (), {"stdout": stdout, "returncode": 0})())
+
+    def test_probe_cuda_provider_names_every_missing_library(self):
+        out = ("\tlibcublasLt.so.13 => not found\n\tlibcudart.so.13 => not found\n"
+               "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f)\n")
+        with self._fake_onnxruntime(), self._ldd(out), patch.object(telemetry, "bootstrap_cuda_env"):
             res = telemetry.probe_cuda_provider()
         self.assertEqual((res["checked"], res["loadable"]), (True, False))
-        self.assertIn("libonnxruntime_providers_cuda.so", res["error"])
+        self.assertEqual(res["error"], "missing shared libraries: libcublasLt.so.13, libcudart.so.13")
+
+    def test_probe_cuda_provider_healthy(self):
+        out = "\tlibcublasLt.so.13 => /x/libcublasLt.so.13 (0x00007f)\n\tlibc.so.6 => /lib/libc.so.6 (0x00007f)\n"
+        with self._fake_onnxruntime(), self._ldd(out), patch.object(telemetry, "bootstrap_cuda_env"):
+            res = telemetry.probe_cuda_provider()
+        self.assertEqual((res["checked"], res["loadable"]), (True, True))
+
+    def test_probe_never_dlopens_the_provider(self):
+        with self._fake_onnxruntime(), self._ldd(""), patch.object(telemetry, "bootstrap_cuda_env"), \
+                patch("prism.telemetry.ctypes.CDLL") as cdll:
+            telemetry.probe_cuda_provider()
+        cdll.assert_not_called()  # dlopen of the provider outside ORT can segfault
+
+    def test_probe_cuda_provider_when_ldd_is_unavailable(self):
+        with self._fake_onnxruntime(), patch.object(telemetry, "bootstrap_cuda_env"), \
+                patch("prism.telemetry.subprocess.run", side_effect=FileNotFoundError("ldd")):
+            res = telemetry.probe_cuda_provider()
+        self.assertFalse(res["checked"])
+        self.assertIn("ldd", res["reason"])
 
     def test_probe_cuda_provider_when_not_applicable(self):
         with patch("prism.telemetry.importlib.util.find_spec", return_value=None):

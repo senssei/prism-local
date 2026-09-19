@@ -12,12 +12,14 @@ First public version.
 - `prism` CLI: `status`, `doctor`, `list`, `pull`, `run`, `chat`, `serve`, `benchmark`, `mcp`, `connect`.
 - Engines: ONNX Runtime GenAI (CUDA or CPU) and Ollama (GGUF), behind one OpenAI-compatible server.
 - `--device auto|cuda|cpu` / `$PRISM_DEVICE`; the device actually used is reported by `benchmark`, `/health` and responses.
-- `prism doctor` checks whether the ONNX Runtime CUDA provider can actually load and names any missing library.
+- `prism doctor` checks (with `ldd`, never `dlopen`, which can crash) that ONNX Runtime's CUDA provider can find all its
+  libraries and names any that are missing.
 - Per-model chat templates (Phi, ChatML/Qwen, Llama 3, DeepSeek).
 - Server: API key (`--api-key`), CORS allowlist (`--cors-origin`), Host-header check, 10 MB body cap, OpenAI-shaped JSON
   errors, streaming with role delta and `finish_reason`, tokenizer-based `usage`, client-disconnect cancellation.
 - Cursor, Cline and MCP connectors.
-- `pyproject.toml` with a `prism` console script and `cuda`, `pull`, `dev`, `docs` extras.
+- `pyproject.toml` with a `prism` console script and `cuda`, `pull`, `dev`, `docs` extras. The `cuda` extra installs a matched
+  stack (`onnxruntime-genai-cuda` and `onnxruntime-gpu[cuda,cudnn]`, CUDA 13; Python 3.11+).
 - Model search paths via `$PRISM_MODEL_DIRS` (default `~/.prism/models`).
 - Documentation site (MkDocs Material) and CI (Python 3.10-3.12, wheel smoke test).
 

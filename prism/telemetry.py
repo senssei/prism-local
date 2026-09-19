@@ -8,6 +8,7 @@ import glob
 import importlib.util
 import os
 import site
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -99,9 +100,12 @@ def bootstrap_cuda_env() -> None:
 
 def probe_cuda_provider() -> Dict[str, Any]:
     """
-    Tries to dlopen ONNX Runtime's CUDA provider so a missing or mismatched CUDA library
-    (e.g. a CUDA 13 build of onnxruntime-genai on a machine with only CUDA 12 wheels) is reported
-    with the exact library name instead of silently running on the CPU.
+    Checks that ONNX Runtime's CUDA provider library can find every shared library it links against, so a
+    missing or mismatched CUDA install (e.g. a CUDA 13 build of onnxruntime with only CUDA 12 wheels) is reported
+    with the exact library names instead of silently running on the CPU.
+
+    Uses `ldd`, which resolves dependencies without executing any library code. (dlopen()ing the provider
+    outside ONNX Runtime is not safe: its initializers expect ORT to host it and it can segfault.)
     """
     try:
         spec = importlib.util.find_spec("onnxruntime")
@@ -111,13 +115,18 @@ def probe_cuda_provider() -> Dict[str, Any]:
         return {"checked": False, "reason": "onnxruntime is not installed"}
     for location in spec.submodule_search_locations:
         lib = os.path.join(location, "capi", "libonnxruntime_providers_cuda.so")
-        if os.path.isfile(lib):
-            bootstrap_cuda_env()
-            try:
-                ctypes.CDLL(lib)
-                return {"checked": True, "loadable": True, "path": lib}
-            except OSError as ex:
-                return {"checked": True, "loadable": False, "path": lib, "error": str(ex)}
+        if not os.path.isfile(lib):
+            continue
+        bootstrap_cuda_env()  # extends LD_LIBRARY_PATH, which the ldd child inherits
+        try:
+            out = subprocess.run(["ldd", lib], capture_output=True, text=True, timeout=15, env=os.environ.copy())
+        except (OSError, subprocess.SubprocessError) as ex:
+            return {"checked": False, "reason": f"could not run ldd: {ex}"}
+        missing = sorted({line.split("=>")[0].strip() for line in out.stdout.splitlines() if "not found" in line})
+        if missing:
+            return {"checked": True, "loadable": False, "path": lib,
+                    "error": f"missing shared libraries: {', '.join(missing)}"}
+        return {"checked": True, "loadable": True, "path": lib}
     return {"checked": False, "reason": "no CUDA provider library found (CPU-only onnxruntime?)"}
 
 

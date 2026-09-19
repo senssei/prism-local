@@ -15,7 +15,7 @@ pip install -e ".[cuda,pull]"
 
 | Extra | Installs | Needed for |
 |---|---|---|
-| `cuda` | `onnxruntime-genai-cuda` | ONNX inference on an NVIDIA GPU |
+| `cuda` | `onnxruntime-genai-cuda`, `onnxruntime-gpu[cuda,cudnn]` (with the CUDA 13 and cuDNN libraries) | ONNX inference on an NVIDIA GPU. Python 3.11+, about 2.5 GB. |
 | `pull` | `huggingface_hub` | `prism pull` from Hugging Face |
 | `dev` | `pytest` | development |
 | `docs` | `mkdocs-material` | building this site |
