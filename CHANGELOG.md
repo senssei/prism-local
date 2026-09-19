@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [SemVer](https://semver.org/) (pre-1.0: minor
 versions may include breaking changes).
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-09-19
 
 First public version.
 
@@ -38,3 +38,5 @@ First public version.
 - Unsynchronised engine access and unhandled errors that dropped connections.
 - `usage.prompt_tokens` was a whitespace word count.
 - CUDA library discovery relied on hard-coded paths and on `LD_LIBRARY_PATH` edits that cannot affect the running process.
+
+[0.1.0]: https://github.com/senssei/prism-local/releases/tag/v0.1.0
