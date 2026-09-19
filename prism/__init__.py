@@ -4,5 +4,5 @@ Refracts disparate local AI runtimes (ONNX Runtime GenAI on NVIDIA CUDA, Ollama/
 into a unified developer CLI, interactive terminal chat, benchmark suite, and OpenAI-compatible REST server.
 """
 
-__version__ = "1.0.0"
-__author__ = "Antigravity Engineering"
+__version__ = "0.1.0"
+__author__ = "Rafal Warzycha"

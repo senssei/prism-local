@@ -1,0 +1,66 @@
+site_name: Prism
+site_description: Multi-engine local AI CLI and OpenAI-compatible server for Linux and WSL2 (ONNX Runtime GenAI + Ollama)
+site_url: https://senssei.github.io/prism-local/
+repo_url: https://github.com/senssei/prism-local
+repo_name: senssei/prism-local
+edit_uri: edit/main/docs/
+strict: true
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle: { icon: material/weather-night, name: Switch to dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle: { icon: material/weather-sunny, name: Switch to light mode }
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      base_path: ["."]
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - Get started:
+      - Installation & configuration: getting-started.md
+      - Devices & CUDA: devices.md
+      - Models: models.md
+  - Reference:
+      - CLI: cli.md
+      - REST API: api.md
+      - Integrations (Cursor, Cline, MCP): integrations.md
+      - Security: security.md
+  - Project:
+      - Architecture: architecture.md
+      - Development: development.md
+      - Changelog: changelog.md
+  - Research:
+      - Overview: research/index.md
+      - Foundry Local evaluation: research/evaluation-report.md
+      - Upstream code analysis: research/upstream-code-analysis.md
+      - WSL2 feasibility: research/foundry-wsl2-feasibility.md
+      - Legacy foundry_wsl toolkit: legacy-foundry-wsl.md

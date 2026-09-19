@@ -252,6 +252,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(200, {
             "status": "ok",
             "active_model": self.manager.current_model_id,
+            "active_device": getattr(self.manager.engine, "device", None),
             "hardware": get_gpu_info(),
         })
 
@@ -358,7 +359,8 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 result = engine.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
                 self._send_json(200, final(
                     result["text"], result.get("finish_reason", "stop"), prompt_tokens, result["tokens_generated"],
-                    {"ttft_sec": result["ttft_sec"], "decode_tok_per_sec": result["decode_tok_per_sec"]},
+                    {"ttft_sec": result["ttft_sec"], "decode_tok_per_sec": result["decode_tok_per_sec"],
+                     "device": result.get("device")},
                 ))
                 return
 

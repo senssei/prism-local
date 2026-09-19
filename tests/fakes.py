@@ -46,6 +46,8 @@ class FakeEngine:
         self.path = path
         self.unloaded = False
         self.last_finish_reason = "stop"
+        self.device = "cpu"
+        self.fallback_reason = None
 
     def count_tokens(self, text):
         return len(text.split())
@@ -88,17 +90,33 @@ class FakeOg:
     Inspect `calls` for what the engine asked of the library.
     """
 
-    def __init__(self, eos_after=None, load_error=None):
+    def __init__(self, eos_after=None, load_error=None, cuda_error=None):
         self.eos_after = eos_after
-        self.load_error = load_error
+        self.load_error = load_error  # raised for every Model(...)
+        self.cuda_error = cuda_error  # raised only when the config asks for the CUDA provider
         self.calls = {"search_options": [], "models": [], "appended": []}
         fake = self
 
-        class Model:
+        class Config:
             def __init__(self, path):
+                self.path = path
+                self.providers = ["<from genai_config>"]
+
+            def clear_providers(self):
+                self.providers = []
+
+            def append_provider(self, name):
+                self.providers.append(name)
+
+        class Model:
+            def __init__(self, arg):
                 if fake.load_error:
                     raise fake.load_error
-                fake.calls["models"].append(path)
+                providers = arg.providers if isinstance(arg, Config) else ["<from genai_config>"]
+                if "cuda" in providers and fake.cuda_error:
+                    raise fake.cuda_error
+                fake.calls["models"].append(providers)
+                self.providers = providers
 
         class _Stream:
             def decode(self, token):
@@ -144,4 +162,5 @@ class FakeOg:
             def get_next_tokens(self):
                 return [self.generated]
 
-        self.Model, self.Tokenizer, self.GeneratorParams, self.Generator = Model, Tokenizer, GeneratorParams, Generator
+        self.Config, self.Model, self.Tokenizer = Config, Model, Tokenizer
+        self.GeneratorParams, self.Generator = GeneratorParams, Generator

@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import tempfile
@@ -34,6 +35,28 @@ class TestPrismConnectors(unittest.TestCase):
     def test_mcp_export_cursor_target(self):
         connect_mcp(target="cursor", write=True, test=False)
         self.assertTrue((Path(".cursor") / "mcp.json").exists())
+
+    def test_cline_export_keeps_other_servers_and_backs_up(self):
+        Path("cline_mcp_settings.json").write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
+        connect_cline(export_mcp=True, test=False)
+        data = json.loads(Path("cline_mcp_settings.json").read_text())
+        self.assertEqual(set(data["mcpServers"]), {"other", "prism"})
+        self.assertIn("autoApprove", data["mcpServers"]["prism"])
+        backup = json.loads(Path("cline_mcp_settings.json.bak").read_text())
+        self.assertEqual(list(backup["mcpServers"]), ["other"])
+
+    def test_cline_mcp_target_merges_too(self):
+        Path("cline_mcp_settings.json").write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
+        connect_mcp(target="cline", write=True, test=False)
+        data = json.loads(Path("cline_mcp_settings.json").read_text())
+        self.assertEqual(set(data["mcpServers"]), {"other", "prism"})
+
+    def test_invalid_existing_json_is_never_overwritten(self):
+        Path("cline_mcp_settings.json").write_text("{ not json")
+        connect_cline(export_mcp=True, test=False)
+        self.assertEqual(Path("cline_mcp_settings.json").read_text(), "{ not json")
+        self.assertFalse(Path("cline_mcp_settings.json.bak").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

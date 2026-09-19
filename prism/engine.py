@@ -5,13 +5,18 @@ Delivers direct GPU acceleration, streaming token generation, and clean memory l
 
 import gc
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple
 
-from prism.telemetry import bootstrap_cuda_env
+from prism.telemetry import bootstrap_cuda_env, get_gpu_info
 from prism.templates import format_prompt  # noqa: F401  (re-exported for callers)
+
+logger = logging.getLogger("prism.engine")
+
+DEVICES = ("auto", "cuda", "cpu")
 
 # Ensure CUDA paths are set before ONNX Runtime loads
 bootstrap_cuda_env()
@@ -24,10 +29,23 @@ except ImportError:
     OG_AVAILABLE = False
 
 
+class ModelLoadError(RuntimeError):
+    """The model could not be loaded (bad files, or the requested execution provider is unavailable)."""
+
+
+def default_device() -> str:
+    """Requested execution provider: $PRISM_DEVICE (auto|cuda|cpu), default auto."""
+    value = os.environ.get("PRISM_DEVICE", "auto").strip().lower() or "auto"
+    if value not in DEVICES:
+        raise ValueError(f"PRISM_DEVICE must be one of {', '.join(DEVICES)} (got '{value}')")
+    return value
+
+
 class Engine(Protocol):
     """What the server, chat and MCP layers need from an inference engine."""
 
     last_finish_reason: str
+    device: str
 
     def count_tokens(self, text: str) -> int: ...
 
@@ -45,7 +63,7 @@ class Engine(Protocol):
 class OnnxGenAiEngine:
     """Wraps onnxruntime_genai for direct CUDA execution."""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, device: Optional[str] = None):
         if not OG_AVAILABLE:
             raise RuntimeError("onnxruntime_genai is not installed in the current environment.")
 
@@ -53,19 +71,58 @@ class OnnxGenAiEngine:
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Model path does not exist: {self.model_path}")
 
+        self.requested_device = (device or default_device()).lower()
+        if self.requested_device not in DEVICES:
+            raise ValueError(f"device must be one of {', '.join(DEVICES)} (got '{device}')")
+        # The execution provider actually in use: "cuda", "cpu", or "default" when the installed
+        # onnxruntime_genai cannot choose and the model's own genai_config decides.
+        self.device = "default"
+        self.fallback_reason: Optional[str] = None
         self._model = None
         self._tokenizer = None
         # "stop" (EOS) or "length" (hit max_tokens) for the most recent completed generation.
         self.last_finish_reason = "stop"
         self._load_model()
 
+    def _model_for(self, provider: str):
+        """Builds a model that runs on `provider` ("cuda" or "cpu"), ignoring genai_config's provider list."""
+        config = og.Config(self.model_path)
+        config.clear_providers()  # an empty list means CPU
+        if provider == "cuda":
+            config.append_provider("cuda")
+        return og.Model(config)
+
     def _load_model(self):
-        """Initializes og.Model and og.Tokenizer."""
+        """Initializes og.Model (on the requested execution provider) and og.Tokenizer."""
+        want = self.requested_device
         try:
-            self._model = og.Model(self.model_path)
+            if not hasattr(og, "Config"):  # older onnxruntime_genai cannot pick a provider
+                self._model = og.Model(self.model_path)
+            elif want == "cpu":
+                self._model, self.device = self._model_for("cpu"), "cpu"
+            elif want == "cuda":
+                try:
+                    self._model, self.device = self._model_for("cuda"), "cuda"
+                except Exception as ex:
+                    raise RuntimeError(
+                        f"CUDA execution provider unavailable: {ex}. Run 'prism doctor' to diagnose, "
+                        f"or use --device cpu / --device auto."
+                    )
+            else:  # auto
+                if get_gpu_info().get("available"):
+                    try:
+                        self._model, self.device = self._model_for("cuda"), "cuda"
+                    except Exception as ex:
+                        self.fallback_reason = f"CUDA execution provider failed to load: {ex}"
+                        logger.warning("%s; falling back to CPU (run 'prism doctor' to diagnose)", self.fallback_reason)
+                else:
+                    self.fallback_reason = "no NVIDIA GPU detected"
+                if self._model is None:
+                    self._model, self.device = self._model_for("cpu"), "cpu"
             self._tokenizer = og.Tokenizer(self._model)
         except Exception as ex:
-            raise RuntimeError(f"Failed to load ONNX model at {self.model_path}: {ex}")
+            self._model = self._tokenizer = None
+            raise ModelLoadError(f"Failed to load ONNX model at {self.model_path}: {ex}")
 
     def count_tokens(self, text: str) -> int:
         """Returns the number of tokens `text` encodes to."""
@@ -102,6 +159,7 @@ class OnnxGenAiEngine:
         return {
             "text": "".join(tokens),
             "finish_reason": self.last_finish_reason,
+            "device": self.device,
             "tokens_generated": token_count,
             "ttft_sec": round(ttft, 4),
             "elapsed_sec": round(total_time, 3),

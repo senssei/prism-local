@@ -38,13 +38,14 @@ class TestOnnxGenAiEngine(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def make(self, **og_kwargs):
+    def make(self, gpu=True, device=None, **og_kwargs):
         fake = FakeOg(**og_kwargs)
-        for target, value in (("og", fake), ("OG_AVAILABLE", True)):
+        for target, value in (("og", fake), ("OG_AVAILABLE", True),
+                              ("get_gpu_info", lambda: {"available": gpu})):
             p = patch.object(engine_mod, target, value)
             p.start()
             self.addCleanup(p.stop)
-        return OnnxGenAiEngine(self.tmp), fake
+        return OnnxGenAiEngine(self.tmp, device=device), fake
 
     def test_stream_yields_tokens_and_first_flag(self):
         engine, _ = self.make()
@@ -104,6 +105,58 @@ class TestOnnxGenAiEngine(unittest.TestCase):
             self.make(load_error=ValueError("bad graph"))
         self.assertIn("Failed to load ONNX model", str(ctx.exception))
         self.assertIn("bad graph", str(ctx.exception))
+
+    # ---- execution provider selection (regression: engine used to silently run on CPU)
+
+    def test_auto_uses_cuda_when_gpu_present(self):
+        engine, fake = self.make(gpu=True)
+        self.assertEqual((engine.device, engine.fallback_reason), ("cuda", None))
+        self.assertEqual(fake.calls["models"], [["cuda"]])  # genai_config's own provider list is overridden
+
+    def test_auto_falls_back_to_cpu_and_says_why_when_cuda_fails_to_load(self):
+        engine, fake = self.make(gpu=True, cuda_error=RuntimeError("libcublasLt.so.13 not found"))
+        self.assertEqual(engine.device, "cpu")
+        self.assertIn("libcublasLt.so.13", engine.fallback_reason)
+        self.assertEqual(fake.calls["models"], [[]])  # cleared providers == CPU
+        self.assertEqual(engine.generate("a b", max_tokens=2)["device"], "cpu")
+
+    def test_auto_without_gpu_never_tries_cuda(self):
+        engine, fake = self.make(gpu=False, cuda_error=RuntimeError("should not be attempted"))
+        self.assertEqual(engine.device, "cpu")
+        self.assertEqual(engine.fallback_reason, "no NVIDIA GPU detected")
+
+    def test_cpu_forces_cpu_even_with_a_gpu(self):
+        engine, fake = self.make(gpu=True, device="cpu")
+        self.assertEqual(engine.device, "cpu")
+        self.assertEqual(fake.calls["models"], [[]])
+
+    def test_cuda_is_strict_and_error_is_actionable(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self.make(gpu=True, device="cuda", cuda_error=RuntimeError("libcublasLt.so.13 not found"))
+        message = str(ctx.exception)
+        self.assertIn("CUDA execution provider unavailable", message)
+        self.assertIn("libcublasLt.so.13", message)
+        self.assertIn("prism doctor", message)
+
+    def test_old_onnxruntime_genai_without_config_reports_default(self):
+        fake = FakeOg()
+        del fake.Config
+        for target, value in (("og", fake), ("OG_AVAILABLE", True), ("get_gpu_info", lambda: {"available": True})):
+            p = patch.object(engine_mod, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        engine = OnnxGenAiEngine(self.tmp)
+        self.assertEqual(engine.device, "default")
+
+    def test_device_from_environment_and_validation(self):
+        with patch.dict(os.environ, {"PRISM_DEVICE": "cpu"}):
+            engine, _ = self.make(gpu=True)
+            self.assertEqual(engine.device, "cpu")
+        with patch.dict(os.environ, {"PRISM_DEVICE": "tpu"}):
+            with self.assertRaises(ValueError):
+                engine_mod.default_device()
+        with self.assertRaises(ValueError):
+            self.make(device="tpu")
 
     def test_requires_onnxruntime_genai(self):
         with patch.object(engine_mod, "OG_AVAILABLE", False):

@@ -5,6 +5,7 @@ Directly probes NVIDIA NVML under WSL2/Linux and ensures dynamic linker resoluti
 
 import ctypes
 import glob
+import importlib.util
 import os
 import site
 import sys
@@ -95,6 +96,30 @@ def bootstrap_cuda_env() -> None:
         os.environ["LD_LIBRARY_PATH"] = ":".join(dirs_to_add + ([cur_ld] if cur_ld else []))
 
     _preload_cuda_libs([d for d in lib_dirs if d != WSL_LIB_DIR])
+
+def probe_cuda_provider() -> Dict[str, Any]:
+    """
+    Tries to dlopen ONNX Runtime's CUDA provider so a missing or mismatched CUDA library
+    (e.g. a CUDA 13 build of onnxruntime-genai on a machine with only CUDA 12 wheels) is reported
+    with the exact library name instead of silently running on the CPU.
+    """
+    try:
+        spec = importlib.util.find_spec("onnxruntime")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is None or not spec.submodule_search_locations:
+        return {"checked": False, "reason": "onnxruntime is not installed"}
+    for location in spec.submodule_search_locations:
+        lib = os.path.join(location, "capi", "libonnxruntime_providers_cuda.so")
+        if os.path.isfile(lib):
+            bootstrap_cuda_env()
+            try:
+                ctypes.CDLL(lib)
+                return {"checked": True, "loadable": True, "path": lib}
+            except OSError as ex:
+                return {"checked": True, "loadable": False, "path": lib, "error": str(ex)}
+    return {"checked": False, "reason": "no CUDA provider library found (CPU-only onnxruntime?)"}
+
 
 class NvmlMemory(ctypes.Structure):
     _fields_ = [

@@ -165,11 +165,12 @@ class TestConcurrency(ServerTestBase):
 class TestHealthAndModels(ServerTestBase):
     def test_health_reports_active_model_after_a_request(self):
         _, data = self.request("GET", "/health")
-        self.assertEqual((data["status"], data["active_model"]), ("ok", None))
+        self.assertEqual((data["status"], data["active_model"], data["active_device"]), ("ok", None, None))
         self.assertIn("hardware", data)
         self.chat()
         _, data = self.request("GET", "/health")
         self.assertEqual(data["active_model"], "qwen-coder-gpu")
+        self.assertEqual(data["active_device"], "cpu")  # FakeEngine.device
 
     def test_models_lists_onnx_and_ollama(self):
         self.ollama_models = [{"id": "ollama:tiny:1b", "name": "tiny:1b", "engine": "Ollama (llama.cpp)",

@@ -24,118 +24,35 @@ class AmbiguousModelError(ValueError):
         self.candidates = candidates
         super().__init__(f"Model '{query}' is ambiguous; matches: {', '.join(candidates)}")
 
+def _microsoft_onnx_variants(name: str, gpu_quant: str, cpu_quant: str) -> Dict[str, Dict[str, Any]]:
+    """Variants for Microsoft's official ONNX Runtime GenAI repos (gpu/ and cpu_and_mobile/ subfolders)."""
+    gpu, cpu = f"gpu/{gpu_quant}", f"cpu_and_mobile/{cpu_quant}"
+    return {
+        "cuda": {"pattern": f"{gpu}/*", "subfolder": gpu, "name": f"{name}-cuda-gpu"},
+        "cpu": {"pattern": f"{cpu}/*", "subfolder": cpu, "name": f"{name}-generic-cpu"},
+    }
+
+
+# Curated shortcuts. Only repos whose layout has been checked against Hugging Face belong here
+# (run scripts/verify_aliases.py); any other repo can be pulled as `prism pull owner/repo`.
 KNOWN_HF_MODELS = {
     "phi-4-mini": {
         "repo_id": "microsoft/Phi-4-mini-instruct-onnx",
-        "variants": {
-            "cuda": {
-                "pattern": "gpu/gpu-int4-rtn-block-32/*",
-                "subfolder": "gpu/gpu-int4-rtn-block-32",
-                "name": "Phi-4-mini-instruct-cuda-gpu",
-            },
-            "cpu": {
-                "pattern": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
-                "subfolder": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4",
-                "name": "Phi-4-mini-instruct-generic-cpu",
-            },
-        },
+        "variants": _microsoft_onnx_variants(
+            "Phi-4-mini-instruct", "gpu-int4-rtn-block-32", "cpu-int4-rtn-block-32-acc-level-4"),
         "family": "Phi-4",
     },
     "phi-4": {
         "repo_id": "microsoft/phi-4-onnx",
-        "variants": {
-            "cuda": {
-                "pattern": "gpu/gpu-int4-rtn-block-32/*",
-                "subfolder": "gpu/gpu-int4-rtn-block-32",
-                "name": "Phi-4-instruct-cuda-gpu",
-            },
-            "cpu": {
-                "pattern": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
-                "subfolder": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4",
-                "name": "Phi-4-instruct-generic-cpu",
-            },
-        },
+        "variants": _microsoft_onnx_variants(
+            "Phi-4-instruct", "gpu-int4-rtn-block-32", "cpu-int4-rtn-block-32-acc-level-4"),
         "family": "Phi-4",
     },
     "phi-3.5-mini": {
         "repo_id": "microsoft/Phi-3.5-mini-instruct-onnx",
-        "variants": {
-            "cuda": {
-                "pattern": "gpu/gpu-int4-rtn-block-32/*",
-                "subfolder": "gpu/gpu-int4-rtn-block-32",
-                "name": "Phi-3.5-mini-instruct-cuda-gpu",
-            },
-            "cpu": {
-                "pattern": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
-                "subfolder": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4",
-                "name": "Phi-3.5-mini-instruct-generic-cpu",
-            },
-        },
+        "variants": _microsoft_onnx_variants(
+            "Phi-3.5-mini-instruct", "gpu-int4-awq-block-128", "cpu-int4-awq-block-128-acc-level-4"),
         "family": "Phi-3.5",
-    },
-    "qwen2.5-coder-7b": {
-        "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-ONNX",
-        "variants": {
-            "cuda": {
-                "pattern": "*",
-                "subfolder": None,
-                "name": "qwen2.5-coder-7b-onnx",
-            },
-            "cpu": {
-                "pattern": "*",
-                "subfolder": None,
-                "name": "qwen2.5-coder-7b-onnx",
-            },
-        },
-        "family": "Qwen2.5",
-    },
-    "qwen2.5-coder-1.5b": {
-        "repo_id": "Qwen/Qwen2.5-Coder-1.5B-Instruct-ONNX",
-        "variants": {
-            "cuda": {
-                "pattern": "*",
-                "subfolder": None,
-                "name": "qwen2.5-coder-1.5b-onnx",
-            },
-            "cpu": {
-                "pattern": "*",
-                "subfolder": None,
-                "name": "qwen2.5-coder-1.5b-onnx",
-            },
-        },
-        "family": "Qwen2.5",
-    },
-    "deepseek-r1-distill-qwen-7b": {
-        "repo_id": "onnx-community/DeepSeek-R1-Distill-Qwen-7B-ONNX",
-        "variants": {
-            "cuda": {
-                "pattern": "*",
-                "subfolder": None,
-                "name": "deepseek-r1-distill-qwen-7b-onnx",
-            },
-            "cpu": {
-                "pattern": "*",
-                "subfolder": None,
-                "name": "deepseek-r1-distill-qwen-7b-onnx",
-            },
-        },
-        "family": "DeepSeek-R1",
-    },
-    "llama-3.2-3b-instruct": {
-        "repo_id": "microsoft/Llama-3.2-3B-Instruct-ONNX",
-        "variants": {
-            "cuda": {
-                "pattern": "gpu/gpu-int4-rtn-block-32/*",
-                "subfolder": "gpu/gpu-int4-rtn-block-32",
-                "name": "llama-3.2-3b-instruct-cuda-gpu",
-            },
-            "cpu": {
-                "pattern": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
-                "subfolder": "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4",
-                "name": "llama-3.2-3b-instruct-generic-cpu",
-            },
-        },
-        "family": "Llama-3.2",
     },
 }
 

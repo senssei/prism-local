@@ -25,7 +25,9 @@ def run_interactive_chat(model_id_or_alias: str):
     if not is_ollama:
         print(f"🔄 Initializing ONNX GenAI CUDA Engine with: {resolved['name']}...")
         engine = OnnxGenAiEngine(resolved["path"])
-        print(f"✅ Model loaded successfully onto GPU.")
+        print(f"✅ Model loaded on {engine.device.upper()}.")
+        if engine.fallback_reason:
+            print(f"⚠️  Running on CPU: {engine.fallback_reason}")
     else:
         print(f"🦙 Routing to Ollama model: {resolved['name']}")
 

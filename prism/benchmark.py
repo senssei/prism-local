@@ -9,6 +9,11 @@ from prism.engine import OnnxGenAiEngine, format_prompt
 from prism.telemetry import get_gpu_info
 
 
+def _vram_used() -> float:
+    devices = get_gpu_info().get("devices")
+    return devices[0]["vram_used_mb"] if devices else 0.0
+
+
 def run_benchmark(model_id_or_alias: str) -> Dict[str, Any]:
     catalog = ModelCatalog()
     resolved = catalog.resolve_model(model_id_or_alias)
@@ -25,15 +30,16 @@ def run_benchmark(model_id_or_alias: str) -> Dict[str, Any]:
     print(f" 🏎️  prism Micro-Benchmark: {resolved['name']}")
     print("=" * 60)
 
-    print("1. Loading model into GPU VRAM...")
+    baseline_vram = _vram_used()
+    print("1. Loading model...")
     t_load_start = time.perf_counter()
     engine = OnnxGenAiEngine(resolved["path"])
     load_time = time.perf_counter() - t_load_start
     print(f"   Model load time: {load_time:.2f}s")
-
-    gpu_info = get_gpu_info()
-    initial_vram = gpu_info["devices"][0]["vram_used_mb"] if gpu_info.get("devices") else 0
-    print(f"   Current VRAM allocated: {initial_vram:.1f} MB")
+    print(f"   Execution provider: {engine.device.upper()}")
+    if engine.fallback_reason:
+        print(f"   ⚠️  NOT running on the GPU: {engine.fallback_reason}")
+    print(f"   VRAM added by load: {_vram_used() - baseline_vram:+.1f} MB")
 
     # Warmup
     print("2. Running warmup run (32 tokens)...")
@@ -50,30 +56,32 @@ def run_benchmark(model_id_or_alias: str) -> Dict[str, Any]:
     res = engine.generate(test_prompt, max_tokens=256)
     total_time = time.perf_counter() - t0
 
-    gpu_info_after = get_gpu_info()
-    peak_vram = gpu_info_after["devices"][0]["vram_used_mb"] if gpu_info_after.get("devices") else 0
+    peak_vram = _vram_used()
 
     print("\n" + "=" * 60)
     print(" 📊 BENCHMARK SCORECARD")
     print("=" * 60)
     print(f"  • Model:                {resolved['name']}")
+    print(f"  • Execution Provider:   {engine.device.upper()}")
     print(f"  • Generation Tokens:    {res['tokens_generated']} tokens")
     print(f"  • Time to First Token:  {res['ttft_sec'] * 1000:.1f} ms ({res['ttft_sec']:.3f}s)")
     print(f"  • Generation Speed:     {res['decode_tok_per_sec']:.1f} tokens/second")
     print(f"  • Total Time:           {res['elapsed_sec']:.2f} seconds")
-    print(f"  • Peak VRAM:            {peak_vram:.1f} MB")
+    print(f"  • VRAM used by model:   {peak_vram - baseline_vram:+.1f} MB (device total {peak_vram:.1f} MB; other apps share it)")
     print("=" * 60)
 
     print("4. Unloading model and reclaiming VRAM...")
     engine.unload()
-    gpu_info_unloaded = get_gpu_info()
-    final_vram = gpu_info_unloaded["devices"][0]["vram_used_mb"] if gpu_info_unloaded.get("devices") else 0
-    print(f"   VRAM after unload: {final_vram:.1f} MB (Freed: {peak_vram - final_vram:.1f} MB)")
+    final_vram = _vram_used()
+    print(f"   VRAM after unload: {final_vram:.1f} MB (freed {peak_vram - final_vram:.1f} MB; "
+          f"{final_vram - baseline_vram:+.1f} MB vs. before load)")
 
     return {
         "model": resolved["name"],
         "tokens": res["tokens_generated"],
         "ttft_sec": res["ttft_sec"],
         "decode_tok_per_sec": res["decode_tok_per_sec"],
-        "peak_vram_mb": peak_vram,
+        "device": engine.device,
+        "vram_used_by_model_mb": round(peak_vram - baseline_vram, 1),
+        "vram_after_unload_vs_baseline_mb": round(final_vram - baseline_vram, 1),
     }

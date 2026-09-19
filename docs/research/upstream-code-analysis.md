@@ -81,7 +81,7 @@ bool HasQualifyingComputeCapability(const std::vector<std::pair<int, int>>& capa
 ```
 
 **WSL2 Compatibility Status:**
-Our diagnostic probe ([`scripts/probe_foundry_ecosystem.py`](../scripts/probe_foundry_ecosystem.py)) executed this exact sequence in WSL2:
+Our diagnostic probe ([`scripts/probe_foundry_ecosystem.py`](https://github.com/senssei/prism-local/blob/main/scripts/probe_foundry_ecosystem.py)) executed this exact sequence in WSL2:
 - `dlopen("/usr/lib/wsl/lib/libnvidia-ml.so.1")` **succeeded**.
 - Correctly identified: **`NVIDIA GeForce RTX 5070`**.
 - Compute Capability: **`12.0`** (Qualifying: `True`).

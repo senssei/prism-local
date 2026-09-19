@@ -12,8 +12,8 @@ from prism.catalog import AmbiguousModelError, ModelCatalog
 from prism.chat import run_interactive_chat
 from prism.benchmark import run_benchmark
 from prism.server import start_server
-from prism.telemetry import get_gpu_info, bootstrap_cuda_env
-from prism.engine import OnnxGenAiEngine, format_prompt, OG_AVAILABLE
+from prism.telemetry import get_gpu_info, bootstrap_cuda_env, probe_cuda_provider
+from prism.engine import ModelLoadError, OnnxGenAiEngine, format_prompt, OG_AVAILABLE
 from prism.ollama_bridge import is_ollama_running, stream_ollama_chat
 from prism.connectors import connect_cursor, connect_cline, connect_mcp
 
@@ -50,7 +50,15 @@ def cmd_doctor(args):
         print(f"❌ NVML Driver: Missing or inaccessible ({gpu.get('error')})")
 
     if OG_AVAILABLE:
-        print("✅ ONNX Runtime GenAI: Installed and ready for CUDA inference.")
+        print("✅ ONNX Runtime GenAI: Installed.")
+        cuda = probe_cuda_provider()
+        if not cuda["checked"]:
+            print(f"ℹ️ CUDA execution provider: not checked ({cuda['reason']}); models will run on CPU.")
+        elif cuda["loadable"]:
+            print("✅ CUDA execution provider: loads; GPU inference is available (--device cuda).")
+        else:
+            print(f"❌ CUDA execution provider: cannot load: {cuda['error']}")
+            print("   Models will fall back to CPU. Install CUDA libraries matching your onnxruntime-genai build.")
     else:
         print("❌ ONNX Runtime GenAI: Not found in current python environment.")
 
@@ -113,6 +121,7 @@ def cmd_run(args):
         print()
     else:
         engine = OnnxGenAiEngine(resolved["path"])
+        print(f"[device: {engine.device}]", file=sys.stderr)
         formatted = format_prompt([{"role": "user", "content": prompt}], resolved.get("template"))
         try:
             for token, _, _ in engine.stream_generate(formatted, max_tokens=args.max_tokens):
@@ -169,7 +178,18 @@ def cmd_connect(args):
         print("Specify a connector target: 'prism connect cursor', 'prism connect cline', or 'prism connect mcp'.")
 
 
+def _device_parent() -> argparse.ArgumentParser:
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument(
+        "--device", choices=["auto", "cuda", "cpu"], default=None,
+        help="ONNX execution provider: auto (CUDA if it loads, else CPU), cuda (fail if unavailable), cpu "
+             "(default: $PRISM_DEVICE or auto)",
+    )
+    return parent
+
+
 def main():
+    device_parent = _device_parent()
     parser = argparse.ArgumentParser(
         prog="prism",
         description="prism: Next-Generation Multi-Engine Local AI CLI & Inference Server for WSL2/Linux",
@@ -199,19 +219,19 @@ def main():
     p_pull.set_defaults(func=cmd_pull)
 
     # run
-    p_run = subparsers.add_parser("run", help="Run model completion or streaming generation")
+    p_run = subparsers.add_parser("run", parents=[device_parent], help="Run model completion or streaming generation")
     p_run.add_argument("model", help="Model name or alias")
     p_run.add_argument("prompt", nargs="?", default=None, help="Prompt text (optional, defaults to chat)")
     p_run.add_argument("--max-tokens", type=int, default=512, help="Max generation tokens")
     p_run.set_defaults(func=cmd_run)
 
     # chat
-    p_chat = subparsers.add_parser("chat", help="Start an interactive streaming terminal chat session")
+    p_chat = subparsers.add_parser("chat", parents=[device_parent], help="Start an interactive streaming terminal chat session")
     p_chat.add_argument("model", help="Model name or alias")
     p_chat.set_defaults(func=cmd_chat)
 
     # serve
-    p_serve = subparsers.add_parser("serve", help="Launch OpenAI-compatible REST server")
+    p_serve = subparsers.add_parser("serve", parents=[device_parent], help="Launch OpenAI-compatible REST server")
     p_serve.add_argument("--port", type=int, default=5272, help="Port to listen on (default: 5272)")
     p_serve.add_argument("--host", default="127.0.0.1", help="Host interface (default: 127.0.0.1; use 0.0.0.0 to expose on the network, ideally with --api-key)")
     p_serve.add_argument("--api-key", default=None, help="Require 'Authorization: Bearer <key>' (default: $PRISM_API_KEY)")
@@ -219,7 +239,7 @@ def main():
     p_serve.set_defaults(func=cmd_serve)
 
     # benchmark
-    p_bench = subparsers.add_parser("benchmark", help="Run automated micro-benchmark (TTFT, tok/s, VRAM)")
+    p_bench = subparsers.add_parser("benchmark", parents=[device_parent], help="Run automated micro-benchmark (TTFT, tok/s, VRAM)")
     p_bench.add_argument("model", help="Model to benchmark (e.g. Phi-4-mini-instruct-cuda-gpu)")
     p_bench.set_defaults(func=cmd_benchmark)
 
@@ -257,9 +277,11 @@ def main():
     if not hasattr(args, "func"):
         parser.print_help()
         sys.exit(1)
+    if getattr(args, "device", None):
+        os.environ["PRISM_DEVICE"] = args.device
     try:
         args.func(args)
-    except AmbiguousModelError as ex:
+    except (AmbiguousModelError, ModelLoadError) as ex:
         print(f"❌ {ex}")
         sys.exit(1)
 

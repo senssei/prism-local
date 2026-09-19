@@ -50,6 +50,20 @@ class TestServeArgs(unittest.TestCase):
         self.assertEqual(start.call_args.kwargs["api_key"], "flag")
 
 
+class TestDeviceFlag(unittest.TestCase):
+    def test_flag_sets_environment_for_the_engine(self):
+        seen = {}
+        with patch.object(cli, "start_server", side_effect=lambda **kw: seen.update(device=os.environ.get("PRISM_DEVICE"))):
+            run_cli("serve", "--device", "cpu")
+            self.assertEqual(seen["device"], "cpu")
+            run_cli("serve")
+            self.assertNotEqual(seen["device"], "cpu")  # not sticky across invocations
+
+    def test_invalid_device_is_rejected(self):
+        code, _ = run_cli("serve", "--device", "tpu")
+        self.assertEqual(code, 2)  # argparse error
+
+
 class TestModelCommands(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -73,6 +87,13 @@ class TestModelCommands(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("ambiguous", out)
         self.assertIn("alpha-phi-cuda-gpu", out)
+
+    def test_run_model_load_failure_is_a_clean_error_not_a_traceback(self):
+        from prism.engine import ModelLoadError
+        with patch.object(cli, "OnnxGenAiEngine", side_effect=ModelLoadError("CUDA execution provider unavailable: x")):
+            code, out = run_cli("run", "alpha-phi-cuda-gpu", "hello", "--device", "cuda")
+        self.assertEqual(code, 1)
+        self.assertIn("CUDA execution provider unavailable", out)
 
     def test_run_unknown_model_exits_1(self):
         code, out = run_cli("run", "nope", "hello")

@@ -4,18 +4,40 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prism-local"
-description = "Multi-engine local AI CLI and OpenAI-compatible server (ONNX Runtime GenAI on CUDA + Ollama) for Linux and WSL2"
+description = "Multi-engine local AI CLI and OpenAI-compatible server (ONNX Runtime GenAI on CUDA/CPU + Ollama) for Linux and WSL2"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Rafal Warzycha" }]
+keywords = ["llm", "onnx", "onnxruntime-genai", "ollama", "openai-compatible", "wsl2", "cuda", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dynamic = ["version"]
 dependencies = []
 
 [project.optional-dependencies]
-# ONNX Runtime GenAI with CUDA, plus the user-space CUDA/cuDNN libraries it needs.
+# ONNX Runtime GenAI with CUDA. The CUDA runtime libraries it needs must match its build (see `prism doctor`).
 cuda = ["onnxruntime-genai-cuda"]
 # `prism pull` for Hugging Face ONNX models.
 pull = ["huggingface_hub"]
 dev = ["pytest"]
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5,<10"]
+
+[project.urls]
+Homepage = "https://github.com/senssei/prism-local"
+Documentation = "https://senssei.github.io/prism-local/"
+Issues = "https://github.com/senssei/prism-local/issues"
+Changelog = "https://github.com/senssei/prism-local/blob/main/CHANGELOG.md"
 
 [project.scripts]
 prism = "prism.cli:main"

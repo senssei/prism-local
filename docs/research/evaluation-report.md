@@ -1,10 +1,17 @@
 # 📘 Comprehensive Evaluation Report: Microsoft Foundry Local on Linux & WSL2
 
-**Author**: Antigravity Autonomous Research & Systems Engineering  
+**Author**: Rafal Warzycha  
 **Evaluation Target**: `microsoft/foundry-local` repository, SDK v2.0.1, CLI Preview 0.10.3, and WSL2 Linux Runtime  
 **Test Hardware**: NVIDIA GeForce RTX 5070 (12,227 MB Dedicated VRAM) | AMD Ryzen 7 5700G (16 vCPUs) | 31.3 GB System RAM  
 **Environment**: WSL2 Ubuntu 24.04.5 LTS (Linux Kernel 6.6.87.2-microsoft-standard-WSL2)  
 **Date**: September 2026  
+
+> **Reproducibility note (2026-09-19).** The CUDA figures for Prism in this report (for example 118–130 tok/s) came from a
+> harness that selects the ONNX Runtime CUDA execution provider explicitly. When re-checked on 2026-09-19 the same machine had
+> `onnxruntime-genai-cuda 0.16.0`, a CUDA 13 build, alongside CUDA 12 runtime libraries only, so the CUDA provider failed to
+> load and inference silently ran on the CPU at about 8 tok/s. Prism's own engine did not select a provider before v0.1.0 and
+> reported such runs as GPU; that is fixed (`--device`, `prism doctor`, and the device now reported by `benchmark` and `/health`).
+> Treat the CUDA numbers as historical until they are re-measured with CUDA libraries that match the installed build.
 
 ---
 
@@ -70,7 +77,7 @@ flowchart TD
 
 ### 1. The Modern SDK (`sdk_v2`, v2.0.1)
 - Completely rewritten from .NET into native C++20 (`libfoundry_local.so`) with an exported C ABI.
-- Implements `NvmlGpuDetector` ([`sdk_v2/cpp/src/ep_detection/nvml_gpu_detector.cc`](file:///home/senssei/03-foundy-local/docs/UPSTREAM_CODE_ANALYSIS.md)) which dynamically loads `libnvidia-ml.so.1` on Linux to query GPU compute capability (verified working on RTX 5070 in WSL2).
+- Implements `NvmlGpuDetector` (`sdk_v2/cpp/src/ep_detection/nvml_gpu_detector.cc` in `microsoft/foundry-local`; see the [upstream code analysis](upstream-code-analysis.md)) which dynamically loads `libnvidia-ml.so.1` on Linux to query GPU compute capability (verified working on RTX 5070 in WSL2).
 - Features a new stateful `ChatSession` API with turn counting, history rollback, and tool calling.
 - Packaged as `manylinux_2_28` wheels for Python and Node.js.
 

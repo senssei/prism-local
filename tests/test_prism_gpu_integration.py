@@ -1,6 +1,6 @@
 """
-Real-hardware smoke tests. Skipped unless onnxruntime_genai, an NVIDIA GPU (NVML) and a CUDA ONNX
-model are all available, so they never run on CI. To run locally:
+Real-hardware smoke tests. Skipped unless onnxruntime_genai, an NVIDIA GPU (NVML) and an ONNX model are
+available AND the CUDA execution provider actually loads, so they never run on CI. To run locally:
 
     PRISM_PYTHON=/path/to/venv/bin/python3 PRISM_MODEL_DIRS=/path/to/models \
         PYTHONPATH=. "$PRISM_PYTHON" -m unittest tests.test_prism_gpu_integration -v
@@ -17,26 +17,36 @@ from prism.server import ActiveEngineManager, create_server
 from prism.telemetry import get_gpu_info
 
 
-def _find_cuda_model():
+def _find_gpu_model():
     if not OG_AVAILABLE or not get_gpu_info().get("available"):
         return None
-    for m in ModelCatalog().discover_onnx_models():
-        if m["device"].startswith("CUDA"):
-            return m
-    return None
+    models = ModelCatalog().discover_onnx_models()
+    # Prefer GPU-targeted variants, but any model works: the device is chosen at load time.
+    models.sort(key=lambda m: not m["device"].startswith("CUDA"))
+    return models[0] if models else None
 
 
-MODEL = _find_cuda_model()
+MODEL = _find_gpu_model()
 
 
-@unittest.skipUnless(MODEL, "needs onnxruntime_genai + NVIDIA GPU + a CUDA ONNX model (see module docstring)")
+@unittest.skipUnless(MODEL, "needs onnxruntime_genai + NVIDIA GPU + an ONNX model (see module docstring)")
 class TestRealCudaEngine(unittest.TestCase):
-    def test_engine_generates_and_reports_metrics(self):
-        engine = OnnxGenAiEngine(MODEL["path"])
+    @classmethod
+    def setUpClass(cls):
+        # A folder name containing "cuda" proves nothing: require the CUDA provider to really load.
         try:
+            OnnxGenAiEngine(MODEL["path"], device="cuda").unload()
+        except RuntimeError as ex:
+            raise unittest.SkipTest(f"CUDA execution provider does not load here: {str(ex)[:200]}")
+
+    def test_engine_runs_on_cuda_and_reports_metrics(self):
+        engine = OnnxGenAiEngine(MODEL["path"], device="cuda")
+        try:
+            self.assertEqual(engine.device, "cuda")
             prompt = "<|user|>\nSay hello.<|end|>\n<|assistant|>\n" if MODEL["template"] == "phi4" else "Say hello."
             self.assertGreater(engine.count_tokens(prompt), 0)
             result = engine.generate(prompt, max_tokens=8, temperature=0.0)
+            self.assertEqual(result["device"], "cuda")
             self.assertGreater(result["tokens_generated"], 0)
             self.assertTrue(result["text"].strip())
             self.assertIn(result["finish_reason"], ("stop", "length"))

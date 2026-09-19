@@ -29,6 +29,24 @@ def _get_prism_bin_path() -> str:
     return str(bin_path)
 
 
+def merge_prism_mcp_entry(cfg_path: Path, prism_entry: Dict[str, Any]) -> None:
+    """
+    Sets `mcpServers.prism` in an MCP client config, keeping every other server. An existing file is
+    copied to `<name>.bak` first. Raises ValueError (and writes nothing) if the existing file is not valid JSON.
+    """
+    data: Dict[str, Any] = {}
+    if cfg_path.exists():
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"{cfg_path} does not contain a JSON object")
+        shutil.copy2(cfg_path, cfg_path.with_name(cfg_path.name + ".bak"))
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"'mcpServers' in {cfg_path} is not an object")
+    servers["prism"] = prism_entry
+    cfg_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def test_prism_server_connection(base_url: str = "http://localhost:5272/v1") -> bool:
     """Tests if the Prism OpenAI REST server is responding."""
     try:
@@ -221,8 +239,11 @@ def connect_cline(
 
     if export_mcp:
         target_file = Path("cline_mcp_settings.json")
-        target_file.write_text(json.dumps(cline_snippet, indent=2), encoding="utf-8")
-        print(f"\n✅ Exported Cline MCP configuration to: {target_file.resolve()}")
+        try:
+            merge_prism_mcp_entry(target_file, cline_snippet["mcpServers"]["prism"])
+            print(f"\n✅ Exported Cline MCP configuration to: {target_file.resolve()}")
+        except ValueError as ex:
+            print(f"\n❌ Not overwriting {target_file}: {ex}")
 
     print("=" * 68 + "\n")
 
@@ -302,8 +323,7 @@ def connect_mcp(
             print(f"   Config Path: {cfg_path}")
             if write:
                 try:
-                    snippet = {"mcpServers": {"prism": prism_server_config}}
-                    cfg_path.write_text(json.dumps(snippet, indent=2), encoding="utf-8")
+                    merge_prism_mcp_entry(cfg_path, prism_server_config)
                     print(f"   ✅ Wrote Cline MCP config to: {cfg_path}")
                 except Exception as ex:
                     print(f"   ❌ Failed to write Cline config: {ex}")

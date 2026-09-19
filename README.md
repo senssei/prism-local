@@ -1,253 +1,130 @@
-# 💎 Prism: Multi-Engine Local AI CLI & Inference Server
+# Prism
 
-A high-performance, developer-first local AI CLI and OpenAI-compatible inference server for **Linux & WSL2**.
+[![CI](https://github.com/senssei/prism-local/actions/workflows/ci.yml/badge.svg)](https://github.com/senssei/prism-local/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 
-**Prism** refracts disparate local AI runtimes—**ONNX Runtime GenAI on NVIDIA CUDA** and **Ollama / llama.cpp (GGUF)**—into a single, unified developer experience with sub-millisecond dispatch, interactive streaming chat, automated benchmarking, zero-dependency REST serving, and IDE connectors for **Cursor, Cline, and Model Context Protocol (MCP)**.
+**A multi-engine local AI CLI and OpenAI-compatible server for Linux and WSL2.**
+Prism puts **ONNX Runtime GenAI** (CUDA or CPU) and **Ollama / llama.cpp** (GGUF) behind one command line, one
+`/v1/chat/completions` endpoint on a fixed port, and ready-made connectors for Cursor, Cline and MCP.
 
----
+📖 **Documentation:** <https://senssei.github.io/prism-local/>
 
-## 🌟 Why Prism?
+> **Status: alpha (v0.1.0).** It works, it is tested (~115 tests, no GPU needed), and its defaults are safe
+> (loopback-only, no CORS). APIs and flags may still change. See [Known limitations](#known-limitations).
 
-Prism was conceived following an in-depth architectural evaluation of **Microsoft Foundry Local** (`microsoft/foundry-local` v0.10.3 and the v2.0 C++ rewrite). Official tools suffer from WSL2 hardware blindness, CPU fallback locks, catalog gating, and ephemeral ports.
+## Why
 
-Prism replaces fragile single-engine tools with an open, multi-engine local runtime:
+Prism began as an evaluation of [Microsoft Foundry Local](https://github.com/microsoft/foundry-local) on WSL2
+(see the [research notes](docs/research/evaluation-report.md)). In that evaluation the official CLI (`0.10.3`) detected no GPU
+under WSL2, ran on the CPU, and served on a random port. Prism keeps the useful part, running ONNX GenAI models locally, and adds:
 
-| Capability | Official `foundry` CLI (`0.10.3`) | 💎 **Prism** (`prism`) |
+| | Foundry CLI 0.10.3 (as evaluated) | Prism |
 |---|---|---|
-| **Engine Architecture** | Single-engine locked | 🔀 **Multi-Engine (ONNX Runtime GenAI + Ollama/GGUF)** |
-| **GPU Detection on WSL2** | ❌ Fails (`GPU: Not detected` via WMI) | ⚡ **Direct NVML hardware detection (`libnvidia-ml.so.1`)** |
-| **Hardware Execution** | ❌ Locks Linux to CPU (`CPUExecutionProvider`) | ⚡ **100% Native CUDA on RTX GPUs (`onnxruntime-genai-cuda`)** |
-| **Decode Speed (Phi-4-mini)**| ❌ 9.1 – 15.3 tok/s (CPU) | 🚀 **118.6 – 130.2 tok/s (CUDA)** |
-| **Time to First Token (TTFT)**| ❌ 5.0 – 7.7 seconds | 🚀 **50 – 60 milliseconds** |
-| **REST Server Port** | ❌ Ephemeral random port (e.g. `:37863`) | 🟢 **Stable, fixed port (default: `:5272`)** |
-| **API Standardization** | ⚠️ OpenAI `/v1` on random port | 🟢 Full OpenAI `/v1/chat/completions` + SSE streaming |
-| **Model Ecosystem** | ❌ Microsoft catalog with 0 CUDA variants | 🟢 Pulls official ONNX weights from HF & GGUF from Ollama |
-| **IDE & Agent Connectors**| ❌ None | 🟢 **Native Cursor, Cline, and MCP connectors** |
-| **VRAM Lifecycle** | ❌ Leaks ~99% VRAM on unload (Issue #1079) | 🟢 Complete GPU memory disposal on unload |
-| **Compatibility Aliases** | N/A | 🟡 `fng` / `foundry-ng` kept as deprecated aliases of `prism` |
+| GPU detection on WSL2 | Not detected (WMI-based) | Direct NVML (`libnvidia-ml.so.1`) |
+| Engines | One | ONNX Runtime GenAI **and** Ollama (GGUF) |
+| Server port | Ephemeral | Fixed, default `127.0.0.1:5272` |
+| Execution provider | Not selectable | `--device auto\|cuda\|cpu`, with the device actually used reported |
+| Model source | Microsoft catalog | Hugging Face ONNX repos, local folders, Ollama registry |
+| IDE / agent integration | None | Cursor, Cline, MCP server |
 
----
-
-## 📦 Installation
-
-Prism has no runtime dependencies; the engines are optional extras.
+## Quickstart
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[cuda,pull]"   # ONNX Runtime GenAI (CUDA) + Hugging Face downloads
-prism doctor
+pip install -e ".[cuda,pull]"     # onnxruntime-genai-cuda + huggingface_hub (both optional)
+prism doctor                       # checks NVML, ONNX Runtime GenAI, the CUDA provider, Ollama
+prism pull phi-4-mini              # downloads to ~/.prism/models
+prism run phi-4-mini "Write a Fibonacci function in Python."
+prism serve                        # http://127.0.0.1:5272/v1
 ```
 
-Or run straight from a checkout with [`./bin/prism`](bin/prism) (no install needed). It picks its Python from `$PRISM_PYTHON`, then `./.venv`, then the active virtualenv, then `python3`.
+You can also run from a checkout without installing: `./bin/prism …`. The Python it uses comes from `$PRISM_PYTHON`, then
+`./.venv`, then the active virtualenv, then `python3`.
 
-### Configuration
+```bash
+curl -s http://127.0.0.1:5272/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "phi-4-mini", "stream": true,
+  "messages": [{"role": "user", "content": "Count from 1 to 5."}]
+}'
+```
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `prism status` / `prism doctor` | GPU and environment diagnostics; `doctor` also tests whether the CUDA provider can load |
+| `prism list` | Local ONNX models plus installed Ollama models |
+| `prism pull <model>` | Hugging Face ONNX (`phi-4-mini`, `owner/repo`) or Ollama (`ollama:qwen2.5-coder:7b`) |
+| `prism run <model> [prompt]` | One-shot completion (reads stdin; no prompt starts chat) |
+| `prism chat <model>` | Interactive streaming chat |
+| `prism serve` | OpenAI-compatible REST server |
+| `prism benchmark <model>` | Load time, TTFT, tokens/s, VRAM delta, and the execution provider used |
+| `prism mcp` / `prism connect …` | MCP server and Cursor/Cline/MCP client setup |
+
+`run`, `chat`, `serve` and `benchmark` accept `--device auto|cuda|cpu` (or `$PRISM_DEVICE`).
+`auto` tries CUDA and falls back to CPU **with a warning that says why**; `cuda` fails instead of falling back.
+
+## Configuration
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `PRISM_MODEL_DIRS` | `:`-separated directories to scan for ONNX models. The first one is where `prism pull` writes. | `~/.prism/models` |
-| `PRISM_PYTHON` | Interpreter used by `bin/prism` | see above |
-| `PRISM_API_KEY` | Bearer token for `prism serve`; also sent by the MCP client and connector probe | unset (no auth) |
+| `PRISM_MODEL_DIRS` | `:`-separated model directories; the first is where `pull` writes | `~/.prism/models` |
+| `PRISM_DEVICE` | `auto`, `cuda` or `cpu` | `auto` |
+| `PRISM_API_KEY` | Bearer token for `serve`; also used by the MCP client | unset (no auth) |
 | `PRISM_BASE_URL` | Server URL used by `prism mcp` | `http://localhost:5272/v1` |
+| `PRISM_PYTHON` | Interpreter used by `bin/prism` | see above |
 
-Models are also discovered in the Foundry Local cache (`~/.foundry/cache/models`). CUDA and cuDNN libraries installed as pip `nvidia-*` wheels are found automatically in the active environment's site-packages and preloaded before ONNX Runtime starts.
+Models in the Foundry Local cache (`~/.foundry/cache/models`) are also discovered.
 
-> **Migrating:** earlier versions scanned `./models` and a sibling `../02-ollama-loadtest` checkout, and `bin/prism` used that checkout's virtualenv. Set `PRISM_MODEL_DIRS` and `PRISM_PYTHON` to keep using them.
+## Security defaults
 
-## 🚀 Quickstart
+`prism serve` binds to **127.0.0.1**, sends **no CORS headers**, rejects non-loopback `Host` headers (DNS-rebinding
+defence) and caps request bodies at 10 MB. To expose it on a network, set a key:
+`prism serve --host 0.0.0.0 --api-key "$(openssl rand -hex 16)"`. Details: [Security](docs/security.md).
 
-The launcher script is [`./bin/prism`](bin/prism). The old names [`./bin/fng`](bin/fng) and [`./bin/foundry-ng`](bin/foundry-ng) still work but are deprecated and print a notice.
-
-```bash
-# Add bin to PATH (optional):
-export PATH="$(pwd)/bin:$PATH"
-
-# 1. System & GPU Telemetry
-prism status
-
-# 2. Environment Doctor Check
-prism doctor
-
-# 3. List All Discovered Models (ONNX + Ollama)
-prism list
-
-# 4. Run a Prompt Completion (ONNX CUDA GPU)
-prism run Phi-4-mini-instruct-cuda-gpu "Write a Python function to compute Fibonacci numbers."
-
-# 5. Run a Prompt Completion (Ollama GGUF)
-prism run ollama:qwen2.5-coder:7b "Explain quicksort in two sentences."
-
-# 6. Interactive Streaming Terminal Chat
-prism chat Phi-4-mini-instruct-cuda-gpu
-
-# 7. Start the OpenAI-Compatible REST Server (binds to 127.0.0.1 by default)
-prism serve --port 5272
-```
-
----
-
-## 🔌 IDE & Agent Connectors (Cursor, Cline, MCP)
-
-Prism provides dedicated connectors for zero-friction integration with your favorite AI coding tools:
-
-### 1. Cursor IDE (`prism connect cursor`)
-Generate custom OpenAI provider settings, export workspace rules, and configure Cursor MCP:
-```bash
-# Display setup instructions and test connectivity
-prism connect cursor --test
-
-# Export .cursorrules into the current workspace
-prism connect cursor --export-rules
-
-# Export Cursor MCP configuration (.cursor/mcp.json)
-prism connect cursor --export-mcp
-```
-
-### 2. Cline Extension (`prism connect cline`)
-Configure Cline (VS Code / Cursor extension) to use Prism as an OpenAI-compatible provider and register MCP tools:
-```bash
-# Display Cline UI settings and test server reachability
-prism connect cline --test
-
-# Export cline_mcp_settings.json
-prism connect cline --export-mcp
-```
-
-### 3. Native Model Context Protocol (MCP) Server & Connector
-Prism contains a built-in stdio JSON-RPC 2.0 MCP server exposing 5 tools:
-- `prism_ask_coder`: Fast local code generation, bug fixing, test authoring with zero token cost.
-- `prism_code_review`: Security, concurrency, and performance code review.
-- `prism_list_models`: Discovered local models across both engines.
-- `prism_get_status`: Real-time NVML GPU telemetry and server status.
-- `prism_benchmark`: Automated latency and throughput micro-benchmark.
+## IDE and agent integration
 
 ```bash
-# Test MCP JSON-RPC protocol handshake
-prism connect mcp --test
-
-# Auto-wire Prism into Antigravity (~/.gemini/config/mcp_config.json)
-prism connect mcp --target antigravity --write
-
-# Auto-wire Cursor (.cursor/mcp.json)
-prism connect mcp --target cursor --write
-
-# Auto-wire Claude Desktop (~/.config/Claude/claude_desktop_config.json)
-prism connect mcp --target claude --write
+prism connect cursor --test --export-rules --export-mcp   # Cursor: provider settings, .cursorrules, MCP
+prism connect cline --test --export-mcp                   # Cline
+prism connect mcp --target claude --write                 # Claude Desktop, Cursor, Antigravity
 ```
 
----
+The MCP server exposes `prism_ask_coder`, `prism_code_review`, `prism_list_models`, `prism_get_status` and `prism_benchmark`.
+See [Integrations](docs/integrations.md).
 
-## 📥 Multi-Engine Model Pulling (`prism pull`)
+## Performance
 
-Download genuine ONNX models from Hugging Face or GGUF models via Ollama with live streaming progress:
+Speed depends almost entirely on which execution provider runs. In our September 2026 evaluation on an RTX 5070,
+Phi-4-mini INT4 decoded at roughly **118–130 tok/s on CUDA** versus **~8–15 tok/s on CPU**. Those CUDA figures are
+**historical**: they have not been reproduced since the environment changed (see the
+[reproducibility note](docs/research/evaluation-report.md)). Use `prism benchmark <model>` on your own machine; it prints the
+provider it really used, and a CUDA build/library mismatch shows up in `prism doctor`.
+
+## Known limitations
+
+- **CUDA setup is on you.** The `onnxruntime-genai-cuda` wheel must match the CUDA libraries installed (a CUDA 13 build
+  needs CUDA 13 libraries). `prism doctor` tells you exactly which library is missing.
+- One ONNX model is resident at a time and requests are serialized (a lock), so this is a single-user local server, not a
+  high-concurrency one.
+- No stop sequences, embeddings, or tool calling on `/v1/chat/completions` yet.
+- Chat templates are detected from the model name and `genai_config.json` (Phi, Qwen/ChatML, Llama 3, DeepSeek); unknown
+  families fall back to ChatML and may need a template added.
+- Linux and WSL2 only.
+
+## Development
 
 ```bash
-# Pull official Microsoft Phi-4 Mini (CUDA INT4 GPU by default):
-prism pull phi-4-mini
-
-# Pull CPU variant explicitly:
-prism pull phi-4-mini --ep cpu
-
-# Pull custom Hugging Face ONNX repo:
-prism pull microsoft/Phi-4-mini-instruct-onnx
-
-# Pull Ollama GGUF model directly via Ollama registry:
-prism pull ollama:qwen2.5-coder:7b
-prism pull deepseek-r1:14b --backend ollama
+pip install -e ".[dev]"
+PYTHONPATH=. python3 -m unittest discover -s tests -v    # ~115 tests, ~6 s, no GPU/network/models needed
+pip install -e ".[docs]" && mkdocs serve                  # docs site at http://127.0.0.1:8000
 ```
 
----
+See [CONTRIBUTING.md](CONTRIBUTING.md). Repository layout: `prism/` (the product), `tests/`, `docs/`, and
+[`foundry_wsl/`](docs/legacy-foundry-wsl.md), the earlier WSL2 bridge toolkit kept for reference.
 
-## 📡 OpenAI-Compatible REST API
+## License
 
-`prism serve` provides a multi-threaded REST server on a predictable static port (default `127.0.0.1:5272`). Inference is serialized behind a lock, so concurrent requests queue rather than crash the engine.
-
-**Security defaults:** the server binds to loopback only, rejects non-loopback `Host` headers (DNS-rebinding defence), sends no CORS headers, and caps request bodies at 10 MB. To expose it or call it from a browser:
-
-```bash
-# Listen on all interfaces, require a bearer token (also read from $PRISM_API_KEY)
-prism serve --host 0.0.0.0 --api-key "$(openssl rand -hex 16)"
-
-# Allow a specific browser origin (repeatable; '*' allows any)
-prism serve --cors-origin http://localhost:3000
-```
-`/health` stays unauthenticated for liveness probes. Chat templates (Phi, ChatML/Qwen, Llama 3, DeepSeek) are chosen per model from its name and `genai_config.json`; unknown families fall back to ChatML.
-
-### 1. List Available Models across Both Engines
-```bash
-curl -s http://127.0.0.1:5272/v1/models | jq .
-```
-
-### 2. Standard Chat Completion
-```bash
-curl -s http://127.0.0.1:5272/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Phi-4-mini-instruct-cuda-gpu",
-    "messages": [{"role": "user", "content": "Write a hello world program in Rust."}],
-    "max_tokens": 100,
-    "stream": false
-  }' | jq .
-```
-
-### 3. Server-Sent Events (SSE) Streaming Completion
-```bash
-curl -s -N http://127.0.0.1:5272/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Phi-4-mini-instruct-cuda-gpu",
-    "messages": [{"role": "user", "content": "Count from 1 to 5."}],
-    "stream": true
-  }'
-```
-
-### 4. Health & Hardware Telemetry Endpoint
-```bash
-curl -s http://127.0.0.1:5272/health | jq .
-```
-
----
-
-## 🏎️ Built-in Micro-Benchmarking
-
-Measure generation throughput, prefill latency, and VRAM memory footprint on your machine:
-
-```bash
-prism benchmark Phi-4-mini-instruct-cuda-gpu
-```
-
-**Verified RTX 5070 Telemetry:**
-- **Time to First Token (TTFT)**: **56.2 ms (0.056s)**
-- **Decode Speed**: **118.6 tok/s**
-- **Token Count**: 256 tokens in 2.16s
-- **Peak VRAM**: 100% within dedicated GPU memory
-
----
-
-## 📑 Evaluation Whitepapers & Research
-
-- 📘 [**`EVALUATION_REPORT.md`**](EVALUATION_REPORT.md): Complete evaluation whitepaper comparing Microsoft Foundry against Ollama, vLLM, and llama.cpp across 8 metrics.
-- 🔬 [**`docs/UPSTREAM_CODE_ANALYSIS.md`**](docs/UPSTREAM_CODE_ANALYSIS.md): Source-level autopsy of `microsoft/foundry-local` examining the C++ `sdk_v2` rewrite vs legacy .NET CLI.
-- 📋 [**`docs/FOUNDRY_WSL2_FEASIBILITY.md`**](docs/FOUNDRY_WSL2_FEASIBILITY.md): Feasibility analysis of WSL2 vs Windows Host Bridge architecture.
-
----
-
-## 🗄️ Legacy: `foundry_wsl`
-
-[`foundry_wsl/`](foundry_wsl/) is the earlier WSL2 bridge toolkit (doctor, cache injector, Windows-host proxy) from the original Foundry Local evaluation. It is kept as-is, is not part of the installable `prism-local` package, and is run from a checkout (`python -m foundry_wsl.cli`). New work goes into `prism/`.
-
----
-
-## 🧪 Running the Test Suite
-
-```bash
-PYTHONPATH=. python3 -m unittest discover -s tests -v
-```
-
-The suite (about 100 tests, ~6 s) needs no GPU, Ollama, network, or models: the server is exercised through a fake engine on an ephemeral port, `OnnxGenAiEngine` against a fake `onnxruntime_genai`, and `pull` against a fake `huggingface_hub`. It covers chat templates, model resolution and caching, OpenAI response and SSE framing, error JSON, auth/CORS/Host checks, engine serialization, client-disconnect cancellation, Ollama routing, CLI argument handling, connectors, and the MCP handshake. GitHub Actions runs it on Python 3.10–3.12 and smoke-tests the built wheel (`.github/workflows/ci.yml`).
-
-Two real-hardware smoke tests (`tests/test_prism_gpu_integration.py`) skip automatically unless `onnxruntime_genai`, an NVIDIA GPU, and a CUDA model are all present:
-
-```bash
-export PRISM_PYTHON=/path/to/venv/bin/python3 PRISM_MODEL_DIRS=/path/to/models
-PYTHONPATH=. "$PRISM_PYTHON" -m unittest tests.test_prism_gpu_integration -v
-```
+[Apache-2.0](LICENSE)
