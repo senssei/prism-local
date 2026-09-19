@@ -138,7 +138,8 @@ class ModelCatalog:
     def resolve_model(self, model_id_or_alias: str) -> Optional[Dict[str, Any]]:
         """
         Resolves a model id, name, path, or unique substring to model metadata.
-        Exact matches win; a substring matching several models raises AmbiguousModelError.
+        Exact matches win, then a curated alias resolves to its best installed variant, then a unique
+        substring; a substring matching several models raises AmbiguousModelError.
         """
         query = (model_id_or_alias or "").strip()
         if not query:
@@ -162,6 +163,17 @@ class ModelCatalog:
         for o in ollama_models:
             if o["name"].lower() == q:
                 return o
+
+        # 1b. A curated alias ("phi-4-mini") means the variant this machine should run, if it is installed;
+        # otherwise it would be ambiguous whenever both variants (or a Foundry-cache copy) exist.
+        alias = KNOWN_HF_MODELS.get(q)
+        if alias:
+            prefer = ("cuda", "cpu") if get_gpu_info().get("available") else ("cpu", "cuda")
+            for ep in prefer:
+                variant_name = alias["variants"][ep]["name"].lower()
+                for m in onnx_models:
+                    if m["name"].lower() == variant_name:
+                        return m
 
         # 2. Unique substring match across ONNX names
         partial = [m for m in onnx_models if q in m["name"].lower()]

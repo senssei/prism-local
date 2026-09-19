@@ -15,6 +15,8 @@ First public version.
 - `prism doctor` checks (with `ldd`, never `dlopen`, which can crash) that ONNX Runtime's CUDA provider can find all its
   libraries and names any that are missing.
 - Per-model chat templates (Phi, ChatML/Qwen, Llama 3, DeepSeek).
+- Curated aliases (`phi-4-mini`, ...) resolve to the installed variant that suits the machine (CUDA if a GPU is present),
+  so they are not ambiguous when several variants exist.
 - Server: API key (`--api-key`), CORS allowlist (`--cors-origin`), Host-header check, 10 MB body cap, OpenAI-shaped JSON
   errors, streaming with role delta and `finish_reason`, tokenizer-based `usage`, client-disconnect cancellation.
 - Cursor, Cline and MCP connectors.

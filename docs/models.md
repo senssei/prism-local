@@ -18,7 +18,10 @@ Discovery results are cached for 5 seconds.
 1. `ollama:<name>` goes straight to Ollama.
 2. An exact match on a model id, name or folder path.
 3. An exact match on an installed Ollama model name.
-4. A **unique** case-insensitive substring of an ONNX model name.
+4. A **curated alias** (`phi-4-mini`, `phi-4`, `phi-3.5-mini`) resolves to the installed variant that suits the machine: the
+   CUDA variant if an NVIDIA GPU is detected, otherwise the CPU variant, falling back to whichever is installed. This keeps
+   `prism run phi-4-mini` working when both variants (or a Foundry-cache copy) exist.
+5. A **unique** case-insensitive substring of an ONNX model name.
 
 More than one substring match is an error that lists the candidates (HTTP 400 `ambiguous_model` from the server); no match
 is "not found".

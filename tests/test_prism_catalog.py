@@ -45,6 +45,32 @@ class TestPrismCatalog(unittest.TestCase):
         self.assertEqual(self.catalog.resolve_model("phi-4-mini")["name"], "Phi-4-mini-instruct-cuda-gpu")
         self.assertEqual(self.catalog.resolve_model("1.5b")["name"], "qwen2.5-coder-1.5b-onnx")
 
+    def _alias_catalog(self, gpu):
+        if not os.path.isdir(os.path.join(self.tmp, "Phi-4-mini-instruct-generic-cpu")):
+            make_model(self.tmp, "Phi-4-mini-instruct-generic-cpu")
+            # Foundry-cache layout: <name>/v5, discovered as "<name>:v5"
+            make_model(os.path.join(self.tmp, "Phi-4-mini-instruct-generic-cpu-5"), "v5")
+        p = patch("prism.catalog.get_gpu_info", return_value={"available": gpu})
+        p.start()
+        self.addCleanup(p.stop)
+        self.catalog.invalidate_cache()
+        return self.catalog
+
+    def test_curated_alias_prefers_the_variant_for_this_machine(self):
+        self.assertEqual(self._alias_catalog(gpu=True).resolve_model("phi-4-mini")["name"],
+                         "Phi-4-mini-instruct-cuda-gpu")
+        self.assertEqual(self._alias_catalog(gpu=False).resolve_model("phi-4-mini")["name"],
+                         "Phi-4-mini-instruct-generic-cpu")
+
+    def test_curated_alias_falls_back_to_whichever_variant_is_installed(self):
+        with patch("prism.catalog.get_gpu_info", return_value={"available": False}):
+            self.assertEqual(self.catalog.resolve_model("phi-4-mini")["name"], "Phi-4-mini-instruct-cuda-gpu")
+
+    def test_curated_alias_does_not_mask_real_ambiguity(self):
+        self._alias_catalog(gpu=True)
+        with self.assertRaises(AmbiguousModelError):
+            self.catalog.resolve_model("phi-4-mini-instruct")  # not an alias: still a plain substring
+
     def test_resolve_ambiguous_raises(self):
         with self.assertRaises(AmbiguousModelError) as ctx:
             self.catalog.resolve_model("qwen2.5-coder")
