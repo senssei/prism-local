@@ -1,0 +1,5 @@
+include LICENSE README.md CHANGELOG.md
+prune tests
+prune docs
+prune scripts
+prune .github

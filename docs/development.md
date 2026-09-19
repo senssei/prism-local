@@ -54,6 +54,26 @@ PYTHONPATH=. python3 scripts/verify_aliases.py    # needs network; exits 1 if an
 
 ## Releasing
 
-1. Update `CHANGELOG.md` and `prism/__init__.py` (`__version__`).
-2. `pip wheel . --no-deps -w dist/` and smoke-test the wheel in a clean virtualenv.
-3. Tag `vX.Y.Z` and create a GitHub release.
+Releases are published from GitHub Actions with PyPI **trusted publishing** (OIDC), so no API tokens are stored anywhere.
+The workflow is `.github/workflows/publish.yml` (manual: *Actions → Publish → Run workflow*).
+
+**One-time setup**
+
+1. On [test.pypi.org](https://test.pypi.org/manage/account/publishing/) (and later [pypi.org](https://pypi.org/manage/account/publishing/)),
+   add a *pending publisher*: project `prism-local`, owner `senssei`, repository `prism-local`, workflow `publish.yml`,
+   environment `testpypi` (respectively `pypi`).
+2. In the GitHub repository, create the environments `testpypi` and `pypi` (*Settings → Environments*). Add yourself as a
+   required reviewer on `pypi` so a release needs an explicit approval.
+
+**Each release**
+
+1. Update `CHANGELOG.md` and `prism/__init__.py` (`__version__`), and merge to `main` with CI green.
+2. Run **Publish → target `testpypi`**. It builds the sdist and wheel, runs `twine check --strict`, uploads to TestPyPI, then
+   installs the uploaded version into a clean virtualenv and smoke-tests `prism --help` and `prism doctor`.
+3. Tag the release (`git tag -s vX.Y.Z && git push origin vX.Y.Z`) and run **Publish** on that tag with target `pypi`. The
+   workflow refuses to publish to PyPI unless it runs from the tag `v<__version__>`.
+4. Create a GitHub release for the tag.
+
+!!! note "Versions are permanent"
+    Neither index lets you re-upload a version, and PyPI never lets you reuse one. Use a pre-release version such as `0.1.0rc1`
+    while rehearsing on TestPyPI if you expect to iterate.
