@@ -120,11 +120,17 @@ class TestOnnxGenAiEngine(unittest.TestCase):
         list(engine.stream_generate("a b c", max_tokens=5, temperature=0.0))
         self.assertEqual(fake.calls["search_options"][-1], {"max_length": 8, "do_sample": False})
 
-    def test_prefill_is_not_chunked_unless_asked(self):
+    def test_prefill_is_chunked_by_default(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("PRISM_PREFILL_CHUNK", None)
             _, fake = self.make()
-        self.assertEqual(fake.calls["overlays"], [])
+        self.assertEqual(fake.calls["overlays"], [{"search": {"chunk_size": 1024}}])
+
+    def test_prefill_chunking_can_be_switched_off(self):
+        for off in ("0", "off", "OFF"):
+            with self.subTest(value=off), patch.dict(os.environ, {"PRISM_PREFILL_CHUNK": off}):
+                _, fake = self.make()
+            self.assertEqual(fake.calls["overlays"], [])
 
     def test_prefill_chunk_size_is_passed_to_the_library(self):
         with patch.dict(os.environ, {"PRISM_PREFILL_CHUNK": "256"}):
@@ -137,7 +143,7 @@ class TestOnnxGenAiEngine(unittest.TestCase):
         self.assertEqual(fake.calls["overlays"], [{"search": {"chunk_size": 512}}])
 
     def test_invalid_prefill_chunk_is_rejected_with_a_clear_message(self):
-        for bad in ("abc", "0", "-5", "2.5"):
+        for bad in ("abc", "-5", "2.5"):
             with self.subTest(value=bad), patch.dict(os.environ, {"PRISM_PREFILL_CHUNK": bad}):
                 with self.assertRaises(Exception) as ctx:
                     self.make()
@@ -146,7 +152,7 @@ class TestOnnxGenAiEngine(unittest.TestCase):
     def test_blank_prefill_chunk_means_unset(self):
         with patch.dict(os.environ, {"PRISM_PREFILL_CHUNK": "  "}):
             _, fake = self.make()
-        self.assertEqual(fake.calls["overlays"], [])
+        self.assertEqual(fake.calls["overlays"], [{"search": {"chunk_size": 1024}}])
 
     def test_count_tokens(self):
         engine, _ = self.make()

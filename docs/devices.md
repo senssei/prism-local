@@ -99,12 +99,17 @@ ends. Measured on Phi-4-mini (int4, CUDA) with an RTX 5070 under WSL2, one proce
 That is about 1.4 MB per prompt token by default, roughly ten times the KV cache, so the growth is not the KV cache. It did not change
 with the CUDA memory allocator settings that were tried (`arena_extend_strategy`, `gpu_mem_limit`), so those do not help.
 
-Setting **`PRISM_PREFILL_CHUNK`** (a token count, e.g. `256`) makes ONNX Runtime GenAI process the prompt in chunks of that size, which
+**`PRISM_PREFILL_CHUNK`** (default `1024`; `0` or `off` disables it) makes ONNX Runtime GenAI process the prompt in chunks of that size, which
 bounded the growth in these measurements: at 4500 tokens, 6.6 GB with 256 (44% less than the default), 7.4 GB with 1024 and 7.7 to 8.7 GB
 with 512 (two runs). Decode speed (73 to 88 tok/s in every setting) and time to first token (about 1.0 s at 4500 tokens) stayed within a few
-percent. It is off by default because the cost is not the same for every model: **check yours** before enabling it. For the longest prompt the
-first 48 greedy tokens differed from the unchunked run (shorter prompts were identical), which is expected from different numerics but
-means outputs are not guaranteed bit-identical.
+percent. For the longest prompt the first 48 greedy tokens differed from the unchunked run (shorter prompts were identical), which is expected
+from different numerics but means outputs are not guaranteed bit-identical.
+
+It is on by default because the memory is also **not returned when the model is unloaded**. With no chunking, a 4200-token prompt on Phi-4-mini
+left 7.3 GB of the GPU held after `unload()` (1.3 GB with chunk 512, 2.3 GB with 1024); the next model, qwen2.5-coder-7b, then found the card
+nearly full and needed 83 s to the first token at 1.2 tok/s, against 0.34 s and 30 tok/s with the default of 1024. Chunk 512 held less memory but
+raised time to first token on qwen3-0.6b (17.5 s against 11.0 s), and 1024 did not on any of the three models measured (Phi-4-mini, qwen3-0.6b,
+qwen2.5-coder-7b), which is why it is the default. If a model is slower with it, **check yours** and set `PRISM_PREFILL_CHUNK` accordingly.
 
 Other models measured the same way (same GPU, 4500-token prompt, chunk of 256; the two `generic-cpu` variants come from the Foundry Local cache
 and run on the CUDA provider under `--device auto`, slowly):

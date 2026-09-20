@@ -6,6 +6,11 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Changed
+- `PRISM_PREFILL_CHUNK` now defaults to `1024` tokens (`0` or `off` restores whole-prompt prefill). Without it, one long prompt left most of the GPU memory
+  held after the model was unloaded, and the next model loaded then ran about 25 times slower (qwen2.5-coder-7b after a 4200-token Phi-4-mini prompt: TTFT
+  83 s and 1.2 tok/s, against 0.34 s and 30 tok/s with the default).
+
 ## [0.2.0] - 2026-09-20
 
 ### Added

@@ -42,22 +42,27 @@ def default_device() -> str:
     return value
 
 
-def prefill_chunk_tokens() -> Optional[int]:
-    """Prompt tokens processed per step: $PRISM_PREFILL_CHUNK (a positive integer); unset keeps the library default.
+DEFAULT_PREFILL_CHUNK = 1024
 
-    By default ONNX Runtime GenAI processes the whole prompt in one step, and the GPU memory it needs grows with the prompt
-    (about 1.4 MB per token for Phi-4-mini, and it is not released afterwards). Processing the prompt in chunks bounds that.
+
+def prefill_chunk_tokens() -> Optional[int]:
+    """Prompt tokens processed per step: $PRISM_PREFILL_CHUNK (a positive integer), default 1024; 0 or "off" processes the whole prompt at once.
+
+    ONNX Runtime GenAI's GPU memory otherwise grows with the prompt (about 1.4 MB per token for Phi-4-mini) and a large part of it is
+    still held after the model is unloaded, which starves the next model that is loaded. Chunking bounds both.
     """
     raw = os.environ.get("PRISM_PREFILL_CHUNK", "").strip()
     if not raw:
+        return DEFAULT_PREFILL_CHUNK
+    if raw.lower() == "off":
         return None
     try:
         value = int(raw)
     except ValueError:
-        value = 0
-    if value <= 0:
-        raise ValueError(f"PRISM_PREFILL_CHUNK must be a positive integer (got '{raw}')")
-    return value
+        value = -1
+    if value < 0:
+        raise ValueError(f"PRISM_PREFILL_CHUNK must be a positive integer, 0 or 'off' (got '{raw}')")
+    return value or None
 
 
 def read_eos_token_ids(model_path: str) -> frozenset:
