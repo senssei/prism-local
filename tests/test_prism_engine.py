@@ -116,7 +116,7 @@ class TestOnnxGenAiEngine(unittest.TestCase):
         engine, fake = self.make()
         list(engine.stream_generate("a b c", max_tokens=5, temperature=0.7, top_p=0.8))
         self.assertEqual(fake.calls["search_options"][-1],
-                         {"max_length": 3 + 5, "temperature": 0.7, "top_p": 0.8, "do_sample": True})
+                         {"max_length": 3 + 5, "temperature": 0.7, "top_p": 0.8, "top_k": 40, "do_sample": True})
         list(engine.stream_generate("a b c", max_tokens=5, temperature=0.0))
         self.assertEqual(fake.calls["search_options"][-1], {"max_length": 8, "do_sample": False})
 
@@ -153,6 +153,52 @@ class TestOnnxGenAiEngine(unittest.TestCase):
         with patch.dict(os.environ, {"PRISM_PREFILL_CHUNK": "  "}):
             _, fake = self.make()
         self.assertEqual(fake.calls["overlays"], [{"search": {"chunk_size": 1024}}])
+
+    def test_sampling_never_inherits_a_top_k_of_one(self):
+        # genai_config.json usually says top_k 1, which makes the library ignore temperature and top_p (every request greedy).
+        import json
+        with open(os.path.join(self.tmp, "genai_config.json"), "w") as f:
+            json.dump({"model": {}, "search": {"top_k": 1}}, f)
+        engine, fake = self.make()
+        list(engine.stream_generate("a b", max_tokens=2, temperature=0.7))
+        self.assertEqual(fake.calls["search_options"][-1]["top_k"], engine_mod.DEFAULT_TOP_K)
+
+    def test_a_larger_top_k_from_genai_config_is_kept(self):
+        import json
+        with open(os.path.join(self.tmp, "genai_config.json"), "w") as f:
+            json.dump({"model": {}, "search": {"top_k": 20}}, f)
+        engine, fake = self.make()
+        list(engine.stream_generate("a b", max_tokens=2, temperature=0.7))
+        self.assertEqual(fake.calls["search_options"][-1]["top_k"], 20)
+
+    def test_top_k_and_repetition_penalty_from_the_caller(self):
+        engine, fake = self.make()
+        list(engine.stream_generate("a b", max_tokens=2, temperature=0.7, top_k=5, repetition_penalty=1.05))
+        opts = fake.calls["search_options"][-1]
+        self.assertEqual((opts["top_k"], opts["repetition_penalty"]), (5, 1.05))
+
+    def test_greedy_runs_take_no_top_k_and_no_penalty_unless_asked(self):
+        engine, fake = self.make()
+        list(engine.stream_generate("a b", max_tokens=2, temperature=0.0, top_k=5))
+        self.assertEqual(fake.calls["search_options"][-1], {"max_length": 4, "do_sample": False})
+
+    def test_generate_passes_the_sampling_arguments_on(self):
+        engine, fake = self.make()
+        engine.generate("a b", max_tokens=2, temperature=0.5, top_k=7, repetition_penalty=1.02)
+        opts = fake.calls["search_options"][-1]
+        self.assertEqual((opts["top_k"], opts["repetition_penalty"]), (7, 1.02))
+
+    def test_token_id_zero_is_a_token_like_any_other(self):
+        # Phi-4's "!" is id 0; a truthiness check on the returned array used to drop it from the output and from the count.
+        engine, _ = self.make(cycle=[0, 5], eos_after=6)
+        pieces = [t for t, _, _ in engine.stream_generate("a b", max_tokens=100)]
+        self.assertEqual(pieces, ["t0 ", "t5 "] * 3)
+        self.assertEqual(engine.last_finish_reason, "stop")
+
+    def test_the_cap_is_reported_as_length_when_id_zero_is_generated(self):
+        engine, _ = self.make(cycle=[0, 5])
+        self.assertEqual(len(list(engine.stream_generate("a b", max_tokens=10))), 10)
+        self.assertEqual(engine.last_finish_reason, "length")
 
     def test_count_tokens(self):
         engine, _ = self.make()
@@ -245,3 +291,49 @@ class TestOnnxGenAiEngine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLoopGuard(unittest.TestCase):
+    CYCLE = [11, 12, 13, 14, 15, 16, 17, 18]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def make(self, **og_kwargs):
+        fake = FakeOg(**og_kwargs)
+        for target, value in (("og", fake), ("OG_AVAILABLE", True), ("get_gpu_info", lambda: {"available": False})):
+            p = patch.object(engine_mod, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        return OnnxGenAiEngine(self.tmp, device="cpu")
+
+    def test_find_token_cycle(self):
+        find = engine_mod.find_token_cycle
+        self.assertEqual(find(list(range(50)) + self.CYCLE * 30), len(self.CYCLE))
+        self.assertEqual(find([7] * 250), 1)
+        self.assertIsNone(find(list(range(400))))
+        self.assertIsNone(find(self.CYCLE * 5))  # a cycle that has not run long enough
+        self.assertIsNone(find(list(range(300)) + self.CYCLE * 10))  # 80 tokens of repeat: below the span
+        self.assertIsNone(find(self.CYCLE * 30 + [99]))  # broken at the very end
+
+    def test_a_stuck_model_is_stopped_early_and_reported_as_length(self):
+        engine = self.make(cycle=self.CYCLE)
+        with self.assertLogs("prism.engine", "WARNING") as logs:
+            pieces = list(engine.stream_generate("a b c", max_tokens=5000))
+        self.assertLess(len(pieces), 400)
+        self.assertEqual(engine.last_finish_reason, "length")
+        self.assertIn("8-token cycle", logs.output[0])
+
+    def test_the_guard_can_be_switched_off(self):
+        for off in ("off", "0"):
+            with self.subTest(value=off), patch.dict(os.environ, {"PRISM_LOOP_GUARD": off}):
+                engine = self.make(cycle=self.CYCLE)
+                self.assertEqual(len(list(engine.stream_generate("a b c", max_tokens=600))), 600)
+                self.assertEqual(engine.last_finish_reason, "length")
+
+    def test_ordinary_output_is_not_flagged(self):
+        engine = self.make(eos_after=800)
+        pieces = list(engine.stream_generate("a b c", max_tokens=5000))
+        self.assertEqual(len(pieces), 800)
+        self.assertEqual(engine.last_finish_reason, "stop")

@@ -58,12 +58,15 @@ Trailing slashes are accepted.
 | `tool_choice` | `"none"` hides the tools for this request. Any other value is treated as `"auto"`: Prism cannot force a call |
 | `temperature` | Default 0.1; `0` means greedy decoding |
 | `top_p` | Default 0.9 |
+| `top_k` | Integer ≥ 1 (an extension to the OpenAI API). ONNX: applies when sampling, default the model's `search.top_k` from `genai_config.json` when that is above 1, else 40. Ollama: passed on |
+| `repetition_penalty` | Number > 0, 1.0 = off (an extension). ONNX: a multiplier on the logits of every token already in the context, prompt included, so values much above 1.05 can wreck the output; it does not stop a model that loops. Ollama: sent as `repeat_penalty` |
+| `frequency_penalty`, `presence_penalty` | −2 to 2. Sent to Ollama. ONNX Runtime GenAI has neither, so a non-zero value is a `400` `unsupported_parameter` on ONNX models (`0` is accepted, clients send it by default) |
 
 Message `content` may be a string or a list of parts; text parts are used and others (images, …) are dropped. Other OpenAI fields (`n`, `response_format`, …) are **accepted and ignored**.
 
 ## Responses
 
-Non-streaming responses follow the OpenAI shape. `finish_reason` is `stop` (end of sequence) or `length` (hit `max_tokens`),
+Non-streaming responses follow the OpenAI shape. `finish_reason` is `stop` (end of sequence) or `length` (hit `max_tokens`, or, on ONNX models, the model was stopped because it kept repeating the same token cycle; see [`PRISM_LOOP_GUARD`](getting-started.md#configuration)),
 and `usage` uses the model tokenizer. Ollama responses carry the `finish_reason` and `usage` the daemon reports (none if it reports none). ONNX responses add a Prism extension:
 
 ```json

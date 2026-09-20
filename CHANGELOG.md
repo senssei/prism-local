@@ -10,6 +10,18 @@ versions may include breaking changes).
 - `PRISM_PREFILL_CHUNK` now defaults to `1024` tokens (`0` or `off` restores whole-prompt prefill). Without it, one long prompt left most of the GPU memory
   held after the model was unloaded, and the next model loaded then ran about 25 times slower (qwen2.5-coder-7b after a 4200-token Phi-4-mini prompt: TTFT
   83 s and 1.2 tok/s, against 0.34 s and 30 tok/s with the default).
+- ONNX sampling: `temperature` and `top_p` now take effect. Most `genai_config.json` files say `top_k: 1`, and with that ONNX Runtime GenAI ignores both, so every
+  request was greedy (Phi-4-mini at temperature 1.5: 1 distinct output in 4 runs before, 4 in 4 now). When sampling, `top_k` is the model's own value if above 1, else 40.
+
+### Added
+- `top_k` and `repetition_penalty` request fields (ONNX and Ollama); `frequency_penalty` / `presence_penalty` go to Ollama, and on ONNX a non-zero value is a `400`
+  `unsupported_parameter` instead of being silently ignored.
+- Loop guard: an ONNX generation that ends in a repeating token cycle (period up to 64 tokens, over at least 200 tokens and 12 repetitions) is stopped after a warning
+  in the log and reported as `finish_reason: length`. `PRISM_LOOP_GUARD=off` disables it.
+
+### Fixed
+- ONNX engine dropped every token with id 0 (`!` in Phi-4: "Wow! Great!" came out as "Wow Great") and did not count it, so a reply cut off at `max_tokens` could be
+  reported as `finish_reason: stop`.
 
 ## [0.2.0] - 2026-09-20
 

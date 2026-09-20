@@ -27,6 +27,7 @@ class FakeEngine:
     and use-after-unload. Class attributes are shared state; call reset() in setUp.
     """
     prompts: List[str] = []
+    sampling: List[dict] = []
     active = 0
     max_active = 0
     produced = 0
@@ -38,6 +39,7 @@ class FakeEngine:
     @classmethod
     def reset(cls):
         cls.prompts = []
+        cls.sampling = []
         cls.active = cls.max_active = cls.produced = 0
         cls.fail_load = False
         cls.pieces = ["Hel", "lo", " world"]
@@ -55,8 +57,10 @@ class FakeEngine:
     def count_tokens(self, text):
         return len(text.split())
 
-    def stream_generate(self, prompt, max_tokens=512, temperature=0.1, top_p=0.9):
+    def stream_generate(self, prompt, max_tokens=512, temperature=0.1, top_p=0.9, top_k=None, repetition_penalty=None):
         FakeEngine.prompts.append(prompt)
+        FakeEngine.sampling.append({"temperature": temperature, "top_p": top_p, "top_k": top_k,
+                                    "repetition_penalty": repetition_penalty})
         with FakeEngine._guard:
             FakeEngine.active += 1
             FakeEngine.max_active = max(FakeEngine.max_active, FakeEngine.active)
@@ -77,13 +81,20 @@ class FakeEngine:
             with FakeEngine._guard:
                 FakeEngine.active -= 1
 
-    def generate(self, prompt, max_tokens=512, temperature=0.1, top_p=0.9):
-        text = "".join(p for p, _, _ in self.stream_generate(prompt, max_tokens, temperature, top_p))
+    def generate(self, prompt, max_tokens=512, temperature=0.1, top_p=0.9, top_k=None, repetition_penalty=None):
+        text = "".join(p for p, _, _ in self.stream_generate(prompt, max_tokens, temperature, top_p, top_k, repetition_penalty))
         return {"text": text, "finish_reason": self.last_finish_reason, "tokens_generated": len(text.split()),
                 "ttft_sec": 0.01, "decode_tok_per_sec": 1.0}
 
     def unload(self):
         self.unloaded = True
+
+
+class _TokenArray(list):
+    """What get_next_tokens() returns: like a numpy array, one element is truthy only when it is not 0."""
+
+    def __bool__(self):
+        return bool(self[0]) if len(self) == 1 else len(self) > 0
 
 
 class FakeOg:
@@ -93,8 +104,9 @@ class FakeOg:
     Inspect `calls` for what the engine asked of the library.
     """
 
-    def __init__(self, eos_after=None, load_error=None, cuda_error=None, silent_tokens=()):
+    def __init__(self, eos_after=None, load_error=None, cuda_error=None, silent_tokens=(), cycle=None):
         self.eos_after = eos_after
+        self.cycle = list(cycle) if cycle else None  # emit these token ids over and over instead of counting up
         self.silent_tokens = set(silent_tokens)  # token ids the streaming decoder turns into "" (like special tokens)
         self.load_error = load_error  # raised for every Model(...)
         self.cuda_error = cuda_error  # raised only when the config asks for the CUDA provider
@@ -167,7 +179,9 @@ class FakeOg:
                 self.length += 1
 
             def get_next_tokens(self):
-                return [self.generated]
+                if fake.cycle:
+                    return _TokenArray([fake.cycle[(self.generated - 1) % len(fake.cycle)]])
+                return _TokenArray([self.generated])
 
         self.Config, self.Model, self.Tokenizer = Config, Model, Tokenizer
         self.GeneratorParams, self.Generator = GeneratorParams, Generator

@@ -292,6 +292,16 @@ class TestOllamaRouting(ServerTestBase):
             resp, data = self.chat(model="tiny:1b", stream=stream)
             self.assertEqual((resp.status, data["error"]["code"]), (502, "backend_unavailable"))
 
+    def test_they_become_ollama_options(self):
+        self.chat(model="tiny:1b", top_k=30, repetition_penalty=1.1, frequency_penalty=0.4, presence_penalty=0.2)
+        options = self.calls[-1][2]
+        self.assertEqual((options["top_k"], options["repeat_penalty"], options["frequency_penalty"], options["presence_penalty"]),
+                         (30, 1.1, 0.4, 0.2))
+
+    def test_nothing_extra_is_sent_when_absent(self):
+        self.chat(model="tiny:1b", frequency_penalty=0)
+        self.assertEqual(set(self.calls[-1][2]), {"num_predict", "temperature", "top_p"})
+
     def test_legacy_completions_route_to_ollama(self):
         resp, data = self.request("POST", "/v1/completions", {"model": "tiny:1b", "prompt": "hello"})
         self.assertEqual(data["choices"][0]["text"], "Hi there")
@@ -725,3 +735,37 @@ class TestDefaultNoCors(ServerTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSamplingParameters(ServerTestBase):
+    def test_top_k_and_repetition_penalty_reach_the_engine(self):
+        resp, _ = self.chat(top_k=30, repetition_penalty=1.05, temperature=0.6)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(FakeEngine.sampling[-1], {"temperature": 0.6, "top_p": 0.9, "top_k": 30, "repetition_penalty": 1.05})
+
+    def test_they_are_left_to_the_engine_when_absent(self):
+        self.chat()
+        self.assertEqual((FakeEngine.sampling[-1]["top_k"], FakeEngine.sampling[-1]["repetition_penalty"]), (None, None))
+
+    def test_completions_take_them_too(self):
+        self.request("POST", "/v1/completions", {"model": "qwen-coder-gpu", "prompt": "hi", "top_k": 12})
+        self.assertEqual(FakeEngine.sampling[-1]["top_k"], 12)
+
+    def test_zero_penalties_are_accepted_because_clients_send_them_by_default(self):
+        resp, _ = self.chat(frequency_penalty=0, presence_penalty=0.0)
+        self.assertEqual(resp.status, 200)
+
+    def test_frequency_and_presence_penalties_are_refused_not_ignored(self):
+        for key in ("frequency_penalty", "presence_penalty"):
+            with self.subTest(key=key):
+                resp, data = self.chat(**{key: 0.5})
+                self.assertEqual((resp.status, data["error"]["code"]), (400, "unsupported_parameter"))
+                self.assertIn(key, data["error"]["message"])
+
+    def test_bad_values_are_400(self):
+        for extra in ({"top_k": 0}, {"top_k": "many"}, {"repetition_penalty": 0}, {"repetition_penalty": "x"},
+                      {"frequency_penalty": 3}, {"presence_penalty": "x"}):
+            with self.subTest(extra=extra):
+                resp, _ = self.chat(**extra)
+                self.assertEqual(resp.status, 400)
+

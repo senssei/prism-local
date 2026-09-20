@@ -156,6 +156,44 @@ def _float_param(req: Dict[str, Any], key: str, default: float) -> float:
         raise ApiError(400, f"'{key}' must be a number")
 
 
+def _sampling_params(req: Dict[str, Any], resolved: Dict[str, Any]) -> Dict[str, Any]:
+    """The sampling parameters beyond temperature/top_p, in the form the backend takes: keyword arguments for the ONNX engine
+    (`top_k`, `repetition_penalty`), Ollama options otherwise. ONNX Runtime GenAI has no frequency/presence penalty, so a non-zero one is
+    refused there instead of being silently ignored."""
+    top_k = req.get("top_k")
+    if top_k is not None:
+        top_k = _int_param(req, ("top_k",), 0)
+    repetition = req.get("repetition_penalty")
+    if repetition is not None:
+        repetition = _float_param(req, "repetition_penalty", 1.0)
+        if repetition <= 0:
+            raise ApiError(400, "'repetition_penalty' must be > 0")
+    penalties = {}
+    for key in ("frequency_penalty", "presence_penalty"):
+        value = _float_param(req, key, 0.0)
+        if not -2.0 <= value <= 2.0:
+            raise ApiError(400, f"'{key}' must be between -2 and 2")
+        penalties[key] = value
+    if resolved.get("backend") == "ollama":
+        options: Dict[str, Any] = {k: v for k, v in penalties.items() if v}
+        if top_k is not None:
+            options["top_k"] = top_k
+        if repetition is not None:
+            options["repeat_penalty"] = repetition
+        return options
+    unsupported = [k for k, v in penalties.items() if v]
+    if unsupported:
+        raise ApiError(400, f"'{unsupported[0]}' is not supported by ONNX Runtime GenAI models; use 'repetition_penalty' "
+                            "(a multiplier, 1.0 = off; values above about 1.05 can degrade the output) or an Ollama model",
+                       code="unsupported_parameter")
+    kwargs: Dict[str, Any] = {}
+    if top_k is not None:
+        kwargs["top_k"] = top_k
+    if repetition is not None:
+        kwargs["repetition_penalty"] = repetition
+    return kwargs
+
+
 MAX_STOP_SEQUENCES = 4  # OpenAI's limit
 MAX_EMBEDDING_INPUTS = 256
 
@@ -452,6 +490,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             include_usage=_include_usage(req),
             stop=_stop_param(req),
             tools=tools,
+            sampling=_sampling_params(req, resolved),
         )
 
     def _handle_embeddings(self):
@@ -513,10 +552,12 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             raw_prompt=prompt,
             include_usage=_include_usage(req),
             stop=_stop_param(req),
+            sampling=_sampling_params(req, resolved),
         )
 
     def _generate(self, resolved, model_id, messages, stream, max_tokens, temperature, top_p, chat, raw_prompt=None,
-                  include_usage=False, stop=(), tools=None):
+                  include_usage=False, stop=(), tools=None, sampling=None):
+        sampling = sampling or {}
         obj = "chat.completion" if chat else "text_completion"
         cmpl_id = f"{'chatcmpl' if chat else 'cmpl'}-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
@@ -570,7 +611,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
 
         if resolved.get("backend") == "ollama":
             self._generate_ollama(resolved, messages, stream, max_tokens, temperature, top_p, stop, include_usage,
-                                  chunk, final, usage_chunk, tools)
+                                  chunk, final, usage_chunk, tools, sampling)
             return
 
         def resolve_tools(text: str, finish: str):
@@ -599,7 +640,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                                    code="context_length_exceeded")
                 max_tokens = min(max_tokens, window - prompt_tokens)  # the room left; hitting it reports finish_reason "length"
             if not stream and not stop:
-                result = engine.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
+                result = engine.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p, **sampling)
                 text, finish, calls = resolve_tools(result["text"], result.get("finish_reason", "stop"))
                 self._send_json(200, final(
                     text, finish, prompt_tokens, result["tokens_generated"],
@@ -608,7 +649,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 ))
                 return
 
-            gen = engine.stream_generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
+            gen = engine.stream_generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p, **sampling)
             stats = _new_stats()
             pieces = _stopped_pieces(gen, stop, stats)
 
@@ -655,8 +696,8 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 gen.close()
 
     def _generate_ollama(self, resolved, messages, stream, max_tokens, temperature, top_p, stop, include_usage,
-                         chunk, final, usage_chunk, tools=None):
-        options: Dict[str, Any] = {"num_predict": max_tokens, "temperature": temperature, "top_p": top_p}
+                         chunk, final, usage_chunk, tools=None, sampling=None):
+        options: Dict[str, Any] = {"num_predict": max_tokens, "temperature": temperature, "top_p": top_p, **(sampling or {})}
         if stop:
             options["stop"] = list(stop)  # Ollama applies stop sequences itself
         text_messages = [_ollama_message(m) for m in messages]  # Ollama wants plain-text content and object arguments

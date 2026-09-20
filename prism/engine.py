@@ -87,6 +87,48 @@ def read_tool_marker_tokens(model_path: str) -> Dict[int, str]:
             if isinstance(t, dict) and t.get("content") in TOOL_MARKERS and isinstance(t.get("id"), int)}
 
 
+DEFAULT_TOP_K = 40
+
+# A model that is stuck repeats one short cycle of tokens until max_tokens. A cycle is reported when the tail of the output repeats
+# with a period of at most LOOP_MAX_PERIOD tokens over at least LOOP_MIN_SPAN tokens and LOOP_MIN_REPEATS repetitions, which ordinary
+# text and code (long lists, tables, repeated lines) do not reach.
+LOOP_MAX_PERIOD = 64
+LOOP_MIN_SPAN = 200
+LOOP_MIN_REPEATS = 12
+LOOP_CHECK_EVERY = 16
+
+
+def read_config_top_k(model_path: str) -> int:
+    """`search.top_k` from the model's genai_config.json when it is above 1, else DEFAULT_TOP_K.
+
+    Most genai_config files ship `top_k: 1`, and with it ONNX Runtime GenAI ignores `temperature` and `top_p` altogether (every request is
+    greedy), so a top_k of 1 cannot be the default for sampling.
+    """
+    try:
+        with open(os.path.join(model_path, "genai_config.json"), encoding="utf-8") as f:
+            value = json.load(f).get("search", {}).get("top_k")
+    except (OSError, ValueError, AttributeError):
+        return DEFAULT_TOP_K
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 1 else DEFAULT_TOP_K
+
+
+def loop_guard_enabled() -> bool:
+    """$PRISM_LOOP_GUARD: `off` or `0` lets a repeating model run to max_tokens; anything else (default) stops it once it is clearly stuck."""
+    return os.environ.get("PRISM_LOOP_GUARD", "").strip().lower() not in ("off", "0")
+
+
+def find_token_cycle(tokens: List[int]) -> Optional[int]:
+    """The period of the token cycle that `tokens` ends in (see LOOP_* above), or None."""
+    n = len(tokens)
+    for period in range(1, LOOP_MAX_PERIOD + 1):
+        span = max(LOOP_MIN_SPAN, LOOP_MIN_REPEATS * period)
+        if n < span:
+            break  # a longer period needs a longer span
+        if all(tokens[i] == tokens[i - period] for i in range(n - 1, n - span + period - 1, -1)):
+            return period
+    return None
+
+
 class Engine(Protocol):
     """What the server, chat and MCP layers need from an inference engine."""
 
@@ -96,11 +138,13 @@ class Engine(Protocol):
     def count_tokens(self, text: str) -> int: ...
 
     def generate(
-        self, prompt: str, max_tokens: int = ..., temperature: float = ..., top_p: float = ...
+        self, prompt: str, max_tokens: int = ..., temperature: float = ..., top_p: float = ...,
+        top_k: Optional[int] = ..., repetition_penalty: Optional[float] = ...
     ) -> Dict[str, Any]: ...
 
     def stream_generate(
-        self, prompt: str, max_tokens: int = ..., temperature: float = ..., top_p: float = ...
+        self, prompt: str, max_tokens: int = ..., temperature: float = ..., top_p: float = ...,
+        top_k: Optional[int] = ..., repetition_penalty: Optional[float] = ...
     ) -> Iterator[Tuple[str, bool, float]]: ...
 
     def unload(self) -> None: ...
@@ -125,6 +169,8 @@ class OnnxGenAiEngine:
         self.device = "default"
         self.fallback_reason: Optional[str] = None
         self._eos_ids = read_eos_token_ids(self.model_path)
+        self._top_k = read_config_top_k(self.model_path)
+        self._loop_guard = loop_guard_enabled()
         # Marker tokens the tokenizer decodes to nothing; without them a tool call cannot be told from prose. See _find_stripped_markers.
         self._literal_tokens: Dict[int, str] = {}
         self._model = None
@@ -201,6 +247,8 @@ class OnnxGenAiEngine:
         max_tokens: int = 512,
         temperature: float = 0.1,
         top_p: float = 0.9,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Runs non-streaming generation and returns text with performance metrics."""
         tokens: List[str] = []
@@ -212,6 +260,8 @@ class OnnxGenAiEngine:
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
         ):
             if is_first:
                 ttft = time.perf_counter() - t0
@@ -237,9 +287,14 @@ class OnnxGenAiEngine:
         max_tokens: int = 512,
         temperature: float = 0.1,
         top_p: float = 0.9,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
     ) -> Iterator[Tuple[str, bool, float]]:
         """
         Yields (token_text, is_first_token, current_tokens_per_sec).
+
+        `top_k` applies when sampling (temperature > 0); by default the model's own genai_config value, or DEFAULT_TOP_K when that is 1.
+        A run that falls into a repeating token cycle is stopped and reported as finish_reason "length" (see find_token_cycle).
         """
         if not self._model or not self._tokenizer:
             raise RuntimeError("Model is not loaded.")
@@ -252,9 +307,12 @@ class OnnxGenAiEngine:
         if temperature > 0.0:
             search_kwargs["temperature"] = temperature
             search_kwargs["top_p"] = top_p
+            search_kwargs["top_k"] = top_k or self._top_k
             search_kwargs["do_sample"] = True
         else:
             search_kwargs["do_sample"] = False
+        if repetition_penalty is not None:
+            search_kwargs["repetition_penalty"] = repetition_penalty
 
         params.set_search_options(**search_kwargs)
 
@@ -266,13 +324,16 @@ class OnnxGenAiEngine:
         first = True
         count = 0
         last_token = None
+        generated: List[int] = []
+        looped = False
         t_start = time.perf_counter()
 
         try:
             while not generator.is_done():
                 generator.generate_next_token()
                 next_tokens = generator.get_next_tokens()
-                if next_tokens:
+                # A numpy array of one element is falsy when that element is 0, and token id 0 is a real token ("!" in Phi-4).
+                if len(next_tokens):
                     last_token = int(next_tokens[0])
                     text = tokenizer_stream.decode(next_tokens[0])
                     if not text and last_token in self._literal_tokens:
@@ -282,8 +343,17 @@ class OnnxGenAiEngine:
                     speed = count / elapsed
                     yield text, first, speed
                     first = False
+                    if self._loop_guard:
+                        generated.append(last_token)
+                        if count % LOOP_CHECK_EVERY == 0:
+                            period = find_token_cycle(generated)
+                            if period:
+                                logger.warning("stopped after %d tokens: the model is repeating a %d-token cycle "
+                                               "(PRISM_LOOP_GUARD=off disables this check)", count, period)
+                                looped = True
+                                break
             # The library reports "done" for both an EOS token and the length cap. Ending on EOS exactly at the cap is still a stop.
-            if count >= max_tokens and last_token not in self._eos_ids:
+            if looped or (count >= max_tokens and last_token not in self._eos_ids):
                 self.last_finish_reason = "length"
         finally:
             del generator

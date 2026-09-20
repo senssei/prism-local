@@ -55,6 +55,7 @@ actually loads**, and whether Ollama is reachable. Fix anything marked ❌ befor
 | `PRISM_MODEL_DIRS` | `:`-separated model directories. The first one is where `prism pull` writes. | `~/.prism/models` |
 | `PRISM_DEVICE` | `auto`, `cuda` or `cpu` | `auto` |
 | `PRISM_PREFILL_CHUNK` | Prompt tokens processed per step (a positive integer; `0` or `off` processes the whole prompt at once); bounds GPU memory on long prompts, see [Devices & CUDA](devices.md#gpu-memory-and-long-prompts) | `1024` |
+| `PRISM_LOOP_GUARD` | `off` or `0` lets an ONNX model that is stuck repeating a short token cycle (at most 64 tokens long, over at least 200 tokens and 12 repeats) run on to `max_tokens`; by default it is stopped, logged, and reported as `finish_reason: length` | on |
 | `PRISM_TEMPLATE` | `auto`, `jinja` or `builtin`: whether to render a model's own Jinja chat template (needs the `jinja` extra); see [Models](models.md#rendering-the-template-itself-optional) | `auto` |
 | `PRISM_API_KEY` | Bearer token for `prism serve`; also sent by the MCP client and connector probe | unset (no auth) |
 | `OLLAMA_HOST` | Ollama daemon address (`host`, `host:port` or a URL), as in Ollama itself | `http://localhost:11434` |
