@@ -83,6 +83,29 @@ and `libnvidia-ml`) is added to `LD_LIBRARY_PATH` for child processes such as th
 - The GPU is shared with Windows applications, so absolute VRAM numbers include them. `prism benchmark` therefore reports
   the *change* in VRAM caused by the model.
 
+## GPU memory and long prompts
+
+With ONNX Runtime GenAI the GPU memory a request needs grows with the **prompt length**, and it is not given back when the request
+ends. Measured on Phi-4-mini (int4, CUDA) with an RTX 5070 under WSL2, one process per setting, greedy decoding, GPU memory in use
+(whole GPU, about 1.1 GB of it before the model was loaded; 5.5 GB right after loading):
+
+| Prompt tokens | Default | `PRISM_PREFILL_CHUNK=256` | `PRISM_PREFILL_CHUNK=1024` |
+|---:|---:|---:|---:|
+| 300 | 5.9 GB | 5.8 GB | 5.9 GB |
+| 1000 | 7.4 GB | 6.5 GB | 7.4 GB |
+| 2200 | 9.5 GB | 6.5 GB | 7.4 GB |
+| 4500 | 11.7 GB | 6.6 GB | 7.4 GB |
+
+That is about 1.4 MB per prompt token by default, roughly ten times the KV cache, so the growth is not the KV cache. It did not change
+with the CUDA memory allocator settings that were tried (`arena_extend_strategy`, `gpu_mem_limit`), so those do not help.
+
+Setting **`PRISM_PREFILL_CHUNK`** (a token count, e.g. `256`) makes ONNX Runtime GenAI process the prompt in chunks of that size, which
+bounded the growth in these measurements: at 4500 tokens, 6.6 GB with 256 (44% less than the default), 7.4 GB with 1024 and 7.7 to 8.7 GB
+with 512 (two runs). Decode speed (73 to 88 tok/s in every setting) and time to first token (about 1.0 s at 4500 tokens) stayed within a few
+percent. It is off by default because it is a measurement on one model and GPU: **check your model** before enabling it. For the longest
+prompt the first 48 greedy tokens differed from the unchunked run (shorter prompts were identical), which is expected from different
+numerics but means outputs are not guaranteed bit-identical.
+
 ## Verifying a GPU run
 
 ```bash

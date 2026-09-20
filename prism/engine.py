@@ -41,6 +41,24 @@ def default_device() -> str:
     return value
 
 
+def prefill_chunk_tokens() -> Optional[int]:
+    """Prompt tokens processed per step: $PRISM_PREFILL_CHUNK (a positive integer); unset keeps the library default.
+
+    By default ONNX Runtime GenAI processes the whole prompt in one step, and the GPU memory it needs grows with the prompt
+    (about 1.4 MB per token for Phi-4-mini, and it is not released afterwards). Processing the prompt in chunks bounds that.
+    """
+    raw = os.environ.get("PRISM_PREFILL_CHUNK", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise ValueError(f"PRISM_PREFILL_CHUNK must be a positive integer (got '{raw}')")
+    return value
+
+
 class Engine(Protocol):
     """What the server, chat and MCP layers need from an inference engine."""
 
@@ -90,6 +108,9 @@ class OnnxGenAiEngine:
         config.clear_providers()  # an empty list means CPU
         if provider == "cuda":
             config.append_provider("cuda")
+        chunk = prefill_chunk_tokens()
+        if chunk and hasattr(config, "overlay"):
+            config.overlay(json.dumps({"search": {"chunk_size": chunk}}))
         return og.Model(config)
 
     def _load_model(self):

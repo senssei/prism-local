@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [SemVer](https://semver.org/) (pre-1.0: minor
 versions may include breaking changes).
 
+## [Unreleased]
+
+### Added
+- `PRISM_PREFILL_CHUNK` (a positive integer of tokens): process the prompt in chunks. ONNX Runtime GenAI's GPU memory otherwise grows by
+  about 1.4 MB per prompt token and is not released; on Phi-4-mini with 4500 prompt tokens the peak fell from 11.7 GB to 6.6 GB with a
+  chunk of 256. Off by default; see [Devices & CUDA](https://senssei.github.io/prism-local/devices/#gpu-memory-and-long-prompts).
+
 ## [0.1.0] - 2026-09-19
 
 First public version.

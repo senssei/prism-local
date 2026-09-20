@@ -94,7 +94,7 @@ class FakeOg:
         self.eos_after = eos_after
         self.load_error = load_error  # raised for every Model(...)
         self.cuda_error = cuda_error  # raised only when the config asks for the CUDA provider
-        self.calls = {"search_options": [], "models": [], "appended": []}
+        self.calls = {"search_options": [], "models": [], "appended": [], "overlays": []}
         fake = self
 
         class Config:
@@ -107,6 +107,9 @@ class FakeOg:
 
             def append_provider(self, name):
                 self.providers.append(name)
+
+            def overlay(self, text):
+                fake.calls["overlays"].append(json.loads(text))
 
         class Model:
             def __init__(self, arg):

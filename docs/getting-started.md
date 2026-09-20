@@ -53,6 +53,7 @@ actually loads**, and whether Ollama is reachable. Fix anything marked ❌ befor
 |---|---|---|
 | `PRISM_MODEL_DIRS` | `:`-separated model directories. The first one is where `prism pull` writes. | `~/.prism/models` |
 | `PRISM_DEVICE` | `auto`, `cuda` or `cpu` | `auto` |
+| `PRISM_PREFILL_CHUNK` | Prompt tokens processed per step (a positive integer, e.g. `256`); bounds GPU memory on long prompts, see [Devices & CUDA](devices.md#gpu-memory-and-long-prompts) | unset (whole prompt at once) |
 | `PRISM_API_KEY` | Bearer token for `prism serve`; also sent by the MCP client and connector probe | unset (no auth) |
 | `PRISM_BASE_URL` | Server URL used by `prism mcp` | `http://localhost:5272/v1` |
 | `PRISM_PYTHON` | Interpreter used by `bin/prism` | see above |
