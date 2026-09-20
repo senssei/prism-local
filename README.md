@@ -1,11 +1,11 @@
 <div align="center">
-  <img src="docs/assets/logo.svg" width="110" height="110" alt="Prism Logo" />
+  <img src="https://senssei.github.io/prism-local/assets/logo.svg" width="110" height="110" alt="Prism Logo" />
   <h1>Prism</h1>
   <p><b>A multi-engine local AI CLI and OpenAI-compatible server for Linux and WSL2.</b></p>
   <p>
     <a href="https://pypi.org/project/prism-local/"><img src="https://img.shields.io/pypi/v/prism-local.svg" alt="PyPI" /></a>
     <a href="https://github.com/senssei/prism-local/actions/workflows/ci.yml"><img src="https://github.com/senssei/prism-local/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
+    <a href="https://github.com/senssei/prism-local/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+" />
     <img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status: alpha" />
   </p>
@@ -16,13 +16,13 @@ Prism puts **ONNX Runtime GenAI** (CUDA or CPU) and **Ollama / llama.cpp** (GGUF
 
 📖 **Documentation:** <https://senssei.github.io/prism-local/>
 
-> **Status: alpha (v0.1.0).** It works, it is tested (~180 tests, no GPU needed), and its defaults are safe
-> (loopback-only, no CORS). APIs and flags may still change. See [Known limitations](#known-limitations).
+> **Status: alpha (v0.2.0).** It works, it is tested (~270 tests, no GPU needed), and its defaults are safe
+> (loopback-only, no CORS). APIs and flags may still change. See [Known limitations](https://github.com/senssei/prism-local#known-limitations).
 
 ## Why
 
 Prism began as an evaluation of [Microsoft Foundry Local](https://github.com/microsoft/foundry-local) on WSL2
-(see the [research notes](docs/research/evaluation-report.md)). In that evaluation the official CLI (`0.10.3`) detected no GPU
+(see the [research notes](https://senssei.github.io/prism-local/research/evaluation-report/)). In that evaluation the official CLI (`0.10.3`) detected no GPU
 under WSL2, ran on the CPU, and served on a random port. Prism keeps the useful part, running ONNX GenAI models locally, and adds:
 
 | | Foundry CLI 0.10.3 (as evaluated) | Prism |
@@ -92,7 +92,7 @@ Models in the Foundry Local cache (`~/.foundry/cache/models`) are also discovere
 
 `prism serve` binds to **127.0.0.1**, sends **no CORS headers**, rejects non-loopback `Host` headers (DNS-rebinding
 defence) and caps request bodies at 10 MB. To expose it on a network, set a key:
-`prism serve --host 0.0.0.0 --api-key "$(openssl rand -hex 16)"`. Details: [Security](docs/security.md).
+`prism serve --host 0.0.0.0 --api-key "$(openssl rand -hex 16)"`. Details: [Security](https://senssei.github.io/prism-local/security/).
 
 ## IDE and agent integration
 
@@ -103,7 +103,7 @@ prism connect mcp --target claude --write                 # Claude Desktop, Curs
 ```
 
 The MCP server exposes `prism_ask_coder`, `prism_code_review`, `prism_list_models`, `prism_get_status` and `prism_benchmark`.
-See [Integrations](docs/integrations.md).
+See [Integrations](https://senssei.github.io/prism-local/integrations/).
 
 ## Performance
 
@@ -117,7 +117,7 @@ two runs each):
 | CPU | 7–9 tok/s | ~0.6 s | none |
 
 Earlier evaluation figures of 118–130 tok/s and a ~56 ms TTFT (see the
-[reproducibility note](docs/research/evaluation-report.md)) were **not reproduced**; the GPU here was shared with about 6.7 GB
+[reproducibility note](https://senssei.github.io/prism-local/research/evaluation-report/)) were **not reproduced**; the GPU here was shared with about 6.7 GB
 of other applications and the prompt differs. Measure your own machine with `prism benchmark <model>`; it prints the provider
 it really used, and `prism doctor` shows a CUDA library mismatch.
 
@@ -137,13 +137,13 @@ it really used, and `prism doctor` shows a CUDA library mismatch.
 
 ```bash
 pip install -e ".[dev]"
-PYTHONPATH=. python3 -m unittest discover -s tests -v    # ~180 tests, ~15 s, no GPU/network/models needed
+PYTHONPATH=. python3 -m unittest discover -s tests -v    # ~270 tests, ~10 s, no GPU/network/models needed
 pip install -e ".[docs]" && mkdocs serve                  # docs site at http://127.0.0.1:8000
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Repository layout: `prism/` (the product), `tests/`, `docs/`, and
-[`foundry_wsl/`](docs/legacy-foundry-wsl.md), the earlier WSL2 bridge toolkit kept for reference.
+See [CONTRIBUTING.md](https://github.com/senssei/prism-local/blob/main/CONTRIBUTING.md). Repository layout: `prism/` (the product), `tests/`, `docs/`, and
+[`foundry_wsl/`](https://senssei.github.io/prism-local/legacy-foundry-wsl/), the earlier WSL2 bridge toolkit kept for reference.
 
 ## License
 
-[Apache-2.0](LICENSE)
+[Apache-2.0](https://github.com/senssei/prism-local/blob/main/LICENSE)

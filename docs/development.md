@@ -10,7 +10,7 @@ pip install -e ".[dev,docs]"
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
 
-The suite (about 120 tests, ~6 s) needs no GPU, network, Ollama or model files.
+The suite (about 270 tests, ~10 s) needs no GPU, network, Ollama or model files.
 
 | Area | How it is tested without hardware |
 |---|---|

@@ -4,7 +4,7 @@ Refracts disparate local AI runtimes (ONNX Runtime GenAI on NVIDIA CUDA, Ollama/
 into a unified developer CLI, interactive terminal chat, benchmark suite, and OpenAI-compatible REST server.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Rafal Warzycha"
 
 PRISM_BANNER = r"""     ____       _                 

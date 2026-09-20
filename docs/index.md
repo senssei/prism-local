@@ -5,7 +5,7 @@
 Prism puts **ONNX Runtime GenAI** (CUDA or CPU) and **Ollama / llama.cpp** (GGUF) behind one command line and one
 `/v1/chat/completions` endpoint on a fixed port, with connectors for Cursor, Cline and the Model Context Protocol.
 
-!!! warning "Alpha software (v0.1.0)"
+!!! warning "Alpha software (v0.2.0)"
     It works and is tested, and the defaults are safe (loopback-only, no CORS), but flags and APIs may still change.
     See [known limitations](#known-limitations).
 

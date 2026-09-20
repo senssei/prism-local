@@ -6,6 +6,8 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-20
+
 ### Added
 - `prism convert MODEL`: converts and quantizes a Hugging Face model (or a local folder) to an ONNX Runtime GenAI folder with onnxruntime-genai's own model builder
   (CUDA or CPU, `int4` or `fp16`) and installs it next to pulled models. Optional `convert` extra; it runs as a subprocess, is verified like a pull, is built in a
@@ -99,4 +101,6 @@ First public version.
 - `usage.prompt_tokens` was a whitespace word count.
 - CUDA library discovery relied on hard-coded paths and on `LD_LIBRARY_PATH` edits that cannot affect the running process.
 
+[Unreleased]: https://github.com/senssei/prism-local/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/senssei/prism-local/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/senssei/prism-local/releases/tag/v0.1.0
