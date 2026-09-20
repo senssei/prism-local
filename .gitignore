@@ -13,3 +13,5 @@ htmlcov/
 build/
 dist/
 site/
+# Scratchpad
+scratch/

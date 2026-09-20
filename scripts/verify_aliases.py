@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Checks every curated alias in prism.catalog.KNOWN_HF_MODELS against Hugging Face: the repo must exist and each variant's
-pattern must match files including a genai_config.json. Needs network access; exits 1 if any alias is broken.
+pattern must match a complete model folder: genai_config.json, an .onnx file and a tokenizer. Needs network access; exits 1 if any alias is broken.
 
     PYTHONPATH=. python3 scripts/verify_aliases.py
 """
@@ -34,7 +34,9 @@ def main() -> int:
             continue
         for ep, variant in info["variants"].items():
             matched = [f for f in files if fnmatch.fnmatch(f, variant["pattern"])]
-            ok = any(f.endswith("genai_config.json") for f in matched)
+            names = [f.rsplit("/", 1)[-1] for f in matched]
+            ok = ("genai_config.json" in names and any(n.endswith(".onnx") for n in names)
+                  and ("tokenizer.json" in names or "tokenizer.model" in names))
             print(f"{'ok  ' if ok else 'FAIL'} {alias:20} {ep:5} {len(matched):3} files  {repo}")
             bad += not ok
     return 1 if bad else 0

@@ -34,6 +34,15 @@ class TestPrismCatalog(unittest.TestCase):
         self.assertEqual((models["qwen2.5-coder-7b-onnx"]["template"], models["qwen2.5-coder-7b-onnx"]["template_source"]),
                          ("chatml", "name"))
 
+    def test_folders_inside_a_model_folder_are_not_separate_models(self):
+        d = make_model(self.tmp, "outer-model", "phi3")
+        os.makedirs(os.path.join(d, "old"))
+        with open(os.path.join(d, "old", "genai_config.json"), "w") as f:
+            f.write("{}")
+        names = [m["name"] for m in self.catalog.discover_onnx_models()]
+        self.assertIn("outer-model", names)
+        self.assertNotIn("old", names)
+
     def test_discover_onnx_models(self):
         models = {m["name"]: m for m in self.catalog.discover_onnx_models()}
         self.assertEqual(set(models), {"Phi-4-mini-instruct-cuda-gpu", "qwen2.5-coder-7b-onnx",

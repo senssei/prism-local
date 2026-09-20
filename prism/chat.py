@@ -7,7 +7,8 @@ import sys
 import time
 from typing import Dict, List, Optional
 from prism.catalog import ModelCatalog
-from prism.engine import OnnxGenAiEngine, format_prompt
+from prism.engine import OnnxGenAiEngine
+from prism.templates import render_prompt
 from prism.ollama_bridge import stream_ollama_chat
 
 
@@ -69,7 +70,7 @@ def run_interactive_chat(model_id_or_alias: str):
                     full_response += chunk
                     token_count += 1
             else:
-                prompt = format_prompt(history, resolved.get("template"))
+                prompt = render_prompt(resolved, history)
                 for token, is_first, speed in engine.stream_generate(prompt=prompt, max_tokens=1024):
                     print(token, end="", flush=True)
                     full_response += token

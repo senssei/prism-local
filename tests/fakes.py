@@ -93,8 +93,9 @@ class FakeOg:
     Inspect `calls` for what the engine asked of the library.
     """
 
-    def __init__(self, eos_after=None, load_error=None, cuda_error=None):
+    def __init__(self, eos_after=None, load_error=None, cuda_error=None, silent_tokens=()):
         self.eos_after = eos_after
+        self.silent_tokens = set(silent_tokens)  # token ids the streaming decoder turns into "" (like special tokens)
         self.load_error = load_error  # raised for every Model(...)
         self.cuda_error = cuda_error  # raised only when the config asks for the CUDA provider
         self.calls = {"search_options": [], "models": [], "appended": [], "overlays": []}
@@ -126,7 +127,7 @@ class FakeOg:
 
         class _Stream:
             def decode(self, token):
-                return f"t{token} "
+                return "" if token in fake.silent_tokens else f"t{token} "
 
         class Tokenizer:
             def __init__(self, model):

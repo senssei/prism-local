@@ -31,7 +31,12 @@ dependencies = []
 cuda = ["onnxruntime-genai-cuda", "onnxruntime-gpu[cuda,cudnn]>=1.30"]
 # `prism pull` for Hugging Face ONNX models.
 pull = ["huggingface_hub"]
-dev = ["pytest"]
+# Render each model's own Jinja chat template (sandboxed) instead of only recognising its family; see docs/models.md.
+jinja = ["jinja2>=3.1"]
+# `prism convert`: ONNX Runtime GenAI's model builder imports these at start-up, and the onnxruntime-genai wheel declares none of them.
+# It also needs onnxruntime-genai (any build): combine with `cuda`, or install `onnxruntime-genai` for CPU. Heavy: torch alone is GBs.
+convert = ["torch", "transformers", "onnx-ir", "safetensors"]
+dev = ["pytest", "jinja2>=3.1"]
 docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5,<10"]
 
 [project.urls]

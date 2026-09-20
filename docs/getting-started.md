@@ -20,6 +20,7 @@ CPU inference or Ollama-only use, and installs nothing else.
 |---|---|---|
 | `cuda` | `onnxruntime-genai-cuda`, `onnxruntime-gpu[cuda,cudnn]` (with the CUDA 13 and cuDNN libraries) | ONNX inference on an NVIDIA GPU. Python 3.11+, about 2.5 GB. |
 | `pull` | `huggingface_hub` | `prism pull` from Hugging Face |
+| `convert` | `torch`, `transformers`, `onnx-ir`, `safetensors` (torch alone is GBs) | `prism convert`. Also needs `onnxruntime-genai`: combine with `cuda`, or install it for CPU. |
 | `dev` | `pytest` | development |
 | `docs` | `mkdocs-material` | building this site |
 
@@ -54,9 +55,11 @@ actually loads**, and whether Ollama is reachable. Fix anything marked ❌ befor
 | `PRISM_MODEL_DIRS` | `:`-separated model directories. The first one is where `prism pull` writes. | `~/.prism/models` |
 | `PRISM_DEVICE` | `auto`, `cuda` or `cpu` | `auto` |
 | `PRISM_PREFILL_CHUNK` | Prompt tokens processed per step (a positive integer, e.g. `256`); bounds GPU memory on long prompts, see [Devices & CUDA](devices.md#gpu-memory-and-long-prompts) | unset (whole prompt at once) |
+| `PRISM_TEMPLATE` | `auto`, `jinja` or `builtin`: whether to render a model's own Jinja chat template (needs the `jinja` extra); see [Models](models.md#rendering-the-template-itself-optional) | `auto` |
 | `PRISM_API_KEY` | Bearer token for `prism serve`; also sent by the MCP client and connector probe | unset (no auth) |
 | `OLLAMA_HOST` | Ollama daemon address (`host`, `host:port` or a URL), as in Ollama itself | `http://localhost:11434` |
 | `PRISM_BASE_URL` | Server URL used by `prism mcp` | `http://localhost:5272/v1` |
+| `PRISM_QUEUE_TIMEOUT` | Seconds a request may wait for the model before `503` (`0` = forever); same as `prism serve --queue-timeout` | `300` |
 | `PRISM_PYTHON` | Interpreter used by `bin/prism` | see above |
 
 Models are searched in `$PRISM_MODEL_DIRS`, then `~/.prism/models`, then the Foundry Local cache

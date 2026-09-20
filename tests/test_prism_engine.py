@@ -53,6 +53,51 @@ class TestOnnxGenAiEngine(unittest.TestCase):
         self.assertEqual([t for t, _, _ in out], ["t1 ", "t2 ", "t3 "])
         self.assertEqual([first for _, first, _ in out], [True, False, False])
 
+    def write_config(self, **model):
+        import json
+        with open(os.path.join(self.tmp, "genai_config.json"), "w") as f:
+            json.dump({"model": model}, f)
+
+    def write_tokenizer(self, *added):
+        import json
+        with open(os.path.join(self.tmp, "tokenizer.json"), "w") as f:
+            json.dump({"added_tokens": [{"id": i, "content": c, "special": True} for i, c in added]}, f)
+
+    def test_tool_call_markers_the_tokenizer_drops_are_put_back(self):
+        # tokens 2 and 4 are `<tool_call>` / `</tool_call>` and decode to nothing; 3 is ordinary text
+        self.write_tokenizer((2, "<tool_call>"), (4, "</tool_call>"), (7, "<|im_end|>"))
+        engine, _ = self.make(silent_tokens={2, 4, 7})
+        text = "".join(t for t, _, _ in engine.stream_generate("one two three four", max_tokens=4))
+        self.assertEqual(text, "t1 <tool_call>t3 </tool_call>")
+
+    def test_markers_the_tokenizer_already_decodes_are_not_doubled(self):
+        self.write_tokenizer((2, "<tool_call>"))
+        engine, _ = self.make()  # nothing is silent: token 2 decodes to "t2 " by itself
+        text = "".join(t for t, _, _ in engine.stream_generate("one two three", max_tokens=3))
+        self.assertEqual(text, "t1 t2 t3 ")
+
+    def test_other_special_tokens_stay_silent(self):
+        self.write_tokenizer((2, "<|im_start|>"))  # not a tool marker
+        engine, _ = self.make(silent_tokens={2})
+        text = "".join(t for t, _, _ in engine.stream_generate("one two three", max_tokens=3))
+        self.assertEqual(text, "t1 t3 ")
+
+    def test_eos_exactly_at_the_cap_is_a_stop(self):
+        self.write_config(eos_token_id=[3, 9])  # FakeOg's third token is 3
+        engine, _ = self.make()
+        result = engine.generate("one two three", max_tokens=3)
+        self.assertEqual((result["tokens_generated"], result["finish_reason"]), (3, "stop"))
+
+    def test_a_single_int_eos_id_works_too(self):
+        self.write_config(eos_token_id=3)
+        engine, _ = self.make()
+        self.assertEqual(engine.generate("one two", max_tokens=3)["finish_reason"], "stop")
+
+    def test_cap_without_eos_is_still_length(self):
+        self.write_config(eos_token_id=99)
+        engine, _ = self.make()
+        self.assertEqual(engine.generate("one two", max_tokens=3)["finish_reason"], "length")
+
     def test_finish_reason_length_when_token_cap_hit(self):
         engine, _ = self.make()
         result = engine.generate("one two three", max_tokens=4)

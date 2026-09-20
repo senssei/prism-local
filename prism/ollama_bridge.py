@@ -8,7 +8,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 
@@ -69,11 +69,13 @@ def stream_ollama_chat(
     options: Optional[Dict[str, Any]] = None,
     base_url: Optional[str] = None,
     stats: Optional[Dict[str, Any]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Iterator[str]:
     """Streams chat completions from Ollama.
 
     When `stats` is given it is filled from the final chunk once the stream ends: `prompt_tokens`, `completion_tokens`
-    and `finish_reason` ("stop" or "length"), whichever the daemon reported.
+    and `finish_reason` ("stop" or "length"), whichever the daemon reported, and `tool_calls` ([{"name", "arguments"}]) when the model
+    called `tools`.
     """
     base_url = base_url or ollama_base_url()
     clean_model = model.replace("ollama:", "")
@@ -83,6 +85,8 @@ def stream_ollama_chat(
         "stream": True,
         "options": options or {},
     }
+    if tools:
+        payload["tools"] = tools
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{base_url}/api/chat",
@@ -103,9 +107,35 @@ def stream_ollama_chat(
                     if "eval_count" in chunk:
                         stats["completion_tokens"] = chunk["eval_count"]
                     stats["finish_reason"] = "length" if chunk.get("done_reason") == "length" else "stop"
-                content = (chunk.get("message") or {}).get("content", "")
+                message = chunk.get("message") or {}
+                if stats is not None:
+                    for call in message.get("tool_calls") or []:
+                        fn = call.get("function") or {}
+                        if fn.get("name"):
+                            args = fn.get("arguments")
+                            stats.setdefault("tool_calls", []).append(
+                                {"name": fn["name"], "arguments": args if isinstance(args, dict) else {}})
+                content = message.get("content", "")
                 if content:
                     yield content
+
+
+def embed_ollama(model: str, inputs: List[str], base_url: Optional[str] = None) -> Tuple[List[List[float]], int]:
+    """Embeddings of `inputs` from Ollama's /api/embed: (one vector per input, prompt tokens the daemon counted)."""
+    base_url = base_url or ollama_base_url()
+    payload = {"model": model.replace("ollama:", "", 1), "input": inputs}
+    req = urllib.request.Request(
+        f"{base_url}/api/embed",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    vectors = data.get("embeddings")
+    if not isinstance(vectors, list) or len(vectors) != len(inputs):
+        raise ValueError("Ollama returned no embeddings for this model (is it an embedding model?)")
+    return vectors, int(data.get("prompt_eval_count") or 0)
 
 
 def pull_ollama_model(model_name: str, base_url: Optional[str] = None) -> bool:

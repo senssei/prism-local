@@ -30,14 +30,25 @@ class TestServeArgs(unittest.TestCase):
     def test_defaults_are_loopback_no_auth_no_cors(self):
         with patch.object(cli, "start_server") as start:
             run_cli("serve")
-        start.assert_called_once_with(port=5272, host="127.0.0.1", api_key=None, cors_origins=[])
+        start.assert_called_once_with(port=5272, host="127.0.0.1", api_key=None, cors_origins=[], queue_timeout=300.0)
 
     def test_flags(self):
         with patch.object(cli, "start_server") as start:
             run_cli("serve", "--port", "6000", "--host", "0.0.0.0", "--api-key", "k",
                     "--cors-origin", "http://a", "--cors-origin", "http://b")
         start.assert_called_once_with(port=6000, host="0.0.0.0", api_key="k",
-                                      cors_origins=["http://a", "http://b"])
+                                      cors_origins=["http://a", "http://b"], queue_timeout=300.0)
+
+    def test_queue_timeout_flag_and_environment(self):
+        with patch.object(cli, "start_server") as start:
+            run_cli("serve", "--queue-timeout", "5")
+            self.assertEqual(start.call_args.kwargs["queue_timeout"], 5.0)
+            run_cli("serve", env={"PRISM_QUEUE_TIMEOUT": "12"})
+            self.assertEqual(start.call_args.kwargs["queue_timeout"], 12.0)
+            run_cli("serve", env={"PRISM_QUEUE_TIMEOUT": "0"})  # 0 means wait forever
+            self.assertIsNone(start.call_args.kwargs["queue_timeout"])
+            run_cli("serve", "--queue-timeout", "7", env={"PRISM_QUEUE_TIMEOUT": "12"})  # the flag wins
+            self.assertEqual(start.call_args.kwargs["queue_timeout"], 7.0)
 
     def test_api_key_from_environment(self):
         with patch.object(cli, "start_server") as start:
@@ -114,6 +125,21 @@ class TestModelCommands(unittest.TestCase):
         self.assertIsNone(pull.call_args.kwargs["output_dir"])  # falls back to the default model dir
         with patch.object(ModelCatalog, "pull_model", return_value=None):
             _, out = run_cli("pull", "phi-4-mini")
+        self.assertIn("failed", out)
+
+    def test_convert_passes_flags_and_reports_success(self):
+        with patch.object(cli, "convert_model", return_value="/some/dir") as opt:
+            code, out = run_cli("convert", "org/model", "--ep", "cpu", "--quant", "int4", "--name", "x",
+                                "--force", "--trust-remote-code")
+        self.assertEqual(code, 0)
+        self.assertIn("completed", out)
+        opt.assert_called_once_with("org/model", output_dir=None, ep="cpu", quant="int4", name="x",
+                                    force=True, trust_remote_code=True)
+
+    def test_convert_failure_exits_1(self):
+        with patch.object(cli, "convert_model", return_value=None):
+            code, out = run_cli("convert", "org/model")
+        self.assertEqual(code, 1)
         self.assertIn("failed", out)
 
 

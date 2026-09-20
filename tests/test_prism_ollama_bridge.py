@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from prism.ollama_bridge import ollama_base_url, stream_ollama_chat
+from prism.ollama_bridge import embed_ollama, ollama_base_url, stream_ollama_chat
 
 
 class FakeResponse(io.BytesIO):
@@ -34,6 +34,58 @@ class TestBaseUrl(unittest.TestCase):
         self.assertEqual(self.url("gpu-box:8080"), "http://gpu-box:8080")
         self.assertEqual(self.url("https://ollama.example/"), "https://ollama.example")
         self.assertEqual(self.url("http://10.0.0.5:9999"), "http://10.0.0.5:9999")
+
+
+class TestEmbed(unittest.TestCase):
+    def call(self, response, inputs=("a", "b")):
+        sent = {}
+
+        def fake_urlopen(req, timeout=None):
+            sent.update(url=req.full_url, body=json.loads(req.data))
+            return FakeResponse(json.dumps(response).encode())
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            return embed_ollama("ollama:nomic-embed-text", list(inputs)), sent
+
+    def test_request_and_response(self):
+        (vectors, tokens), sent = self.call({"embeddings": [[1, 2], [3, 4]], "prompt_eval_count": 5})
+        self.assertEqual((vectors, tokens), ([[1, 2], [3, 4]], 5))
+        self.assertTrue(sent["url"].endswith("/api/embed"))
+        self.assertEqual(sent["body"], {"model": "nomic-embed-text", "input": ["a", "b"]})
+
+    def test_a_reply_without_the_right_number_of_vectors_is_an_error(self):
+        for bad in ({}, {"embeddings": []}, {"embeddings": [[1]]}, {"error": "x"}):
+            with self.assertRaises(ValueError):
+                self.call(bad)
+
+    def test_missing_token_count_is_zero(self):
+        (_, tokens), _ = self.call({"embeddings": [[1]]}, inputs=("a",))
+        self.assertEqual(tokens, 0)
+
+
+class TestTools(unittest.TestCase):
+    def test_tools_are_sent_and_calls_collected(self):
+        tools = [{"type": "function", "function": {"name": "get_weather"}}]
+        sent = {}
+
+        def fake_urlopen(req, timeout=None):
+            sent.update(json.loads(req.data))
+            return ndjson({"message": {"content": "", "tool_calls": [
+                {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}},
+                {"function": {"name": "other", "arguments": "not a dict"}}, {"function": {}}]}, "done": True})
+
+        stats = {}
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertEqual("".join(stream_ollama_chat("m", [], stats=stats, tools=tools)), "")
+        self.assertEqual(sent["tools"], tools)
+        self.assertEqual(stats["tool_calls"], [{"name": "get_weather", "arguments": {"city": "Paris"}},
+                                               {"name": "other", "arguments": {}}])
+
+    def test_no_tools_key_when_there_are_none(self):
+        sent = {}
+        with patch("urllib.request.urlopen", side_effect=lambda req, timeout=None: (sent.update(json.loads(req.data)), ndjson())[1]):
+            list(stream_ollama_chat("m", []))
+        self.assertNotIn("tools", sent)
 
 
 class TestStreamStats(unittest.TestCase):

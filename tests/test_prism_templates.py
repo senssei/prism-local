@@ -3,9 +3,11 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from prism.templates import (classify_chat_template, detect_template, flatten_content, format_prompt, read_chat_template,
-                             resolve_template)
+from prism.templates import (classify_chat_template, detect_template, flatten_content, format_prompt, jinja_available,
+                             read_chat_template, read_tokenizer_tokens, render_chat_template, render_prompt, resolve_template,
+                             template_mode)
 
 # Chat templates copied from Microsoft's ONNX Runtime GenAI models (the same files `prism pull` downloads).
 PHI35_TEMPLATE = (
@@ -27,7 +29,14 @@ PHI4_MINI_TEMPLATE = (
 CHATML_TEMPLATE = "{% for m in messages %}{{'<|im_start|>' + m['role'] + '\n' + m['content'] + '<|im_end|>\n'}}{% endfor %}"
 LLAMA3_TEMPLATE = "{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}"
 DEEPSEEK_TEMPLATE = "{{'<｜User｜>' + message['content']}}{{'<｜Assistant｜>'}}"
+# Verbatim from microsoft/mistral-7b-instruct-v0.2-ONNX and unsloth/gemma-2-2b-it (tokenizer_config.json).
+MISTRAL_V02_TEMPLATE = "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token}}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"
+GEMMA2_TEMPLATE = "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if (message['role'] == 'assistant') %}{% set role = 'model' %}{% else %}{% set role = message['role'] %}{% endif %}{{ '<start_of_turn>' + role + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% endfor %}{% if add_generation_prompt %}{{'<start_of_turn>model\n'}}{% endif %}"
+# Mistral v0.3 (and later) and Gemma 3, cut down to the parts that identify them.
+MISTRAL_V03_TEMPLATE = "{{ bos_token }}{% for m in messages %}{{ '[INST] ' + m['content'] + '[/INST]' }}{% endfor %}"
+LLAMA2_TEMPLATE = "{% for m in messages %}{{ '[INST] <<SYS>>\n' + m['content'] + '\n<</SYS>>\n\n [/INST]' }}{% endfor %}"
 GEMMA_TEMPLATE = "{{ '<start_of_turn>' + message['role'] + '\n' + message['content'] + '<end_of_turn>\n' }}"
+UNKNOWN_TEMPLATE = "{% for m in messages %}{{ '### ' + m['role'] + ': ' + m['content'] + '\n' }}{% endfor %}"
 
 MSGS = [
     {"role": "system", "content": "Be brief."},
@@ -77,6 +86,27 @@ class TestTemplates(unittest.TestCase):
         out = format_prompt([{"role": "user", "content": [{"type": "text", "text": "hi"}]}], "chatml")
         self.assertIn("<|im_start|>user\nhi<|im_end|>", out)
 
+    def test_detect_gemma_and_mistral_by_name(self):
+        self.assertEqual(detect_template("gemma-2-2b-it-onnx"), "gemma")
+        self.assertEqual(detect_template("mistral-7b-instruct-v0.2-cuda-int4-rtn-block-32"), "mistral_v02")
+        self.assertEqual(detect_template("Mistral-7B-Instruct-v0.3-onnx"), "mistral")
+        self.assertEqual(detect_template("model", model_type="mistral"), "mistral")
+
+    def test_mistral_formats(self):  # same prompts as the real Jinja templates render (BOS is added by the tokenizer)
+        m = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}, {"role": "user", "content": "Bye"}]
+        self.assertEqual(format_prompt(m, "mistral_v02"), "[INST] Hi [/INST]Hello</s>[INST] Bye [/INST]")
+        self.assertEqual(format_prompt(m, "mistral"), "[INST] Hi[/INST] Hello</s>[INST] Bye[/INST]")
+        # no system role: the system prompt leads the last user message
+        self.assertEqual(format_prompt([{"role": "system", "content": "S"}] + m, "mistral"),
+                         "[INST] Hi[/INST] Hello</s>[INST] S\n\nBye[/INST]")
+
+    def test_gemma_format(self):
+        m = [{"role": "system", "content": "S"}, {"role": "user", "content": " Hi "},
+             {"role": "assistant", "content": "Hello"}, {"role": "user", "content": "Bye"}]
+        self.assertEqual(format_prompt(m, "gemma"),
+                         "<start_of_turn>user\nS\n\nHi<end_of_turn>\n<start_of_turn>model\nHello<end_of_turn>\n"
+                         "<start_of_turn>user\nBye<end_of_turn>\n<start_of_turn>model\n")
+
     def test_phi4_family_formats(self):
         m = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
         self.assertEqual(format_prompt(m, "phi4_im"),
@@ -90,13 +120,16 @@ class TestTemplates(unittest.TestCase):
 class TestChatTemplateDetection(unittest.TestCase):
     def test_classify_real_templates(self):
         for text, expected in ((PHI35_TEMPLATE, "phi4"), (PHI4_TEMPLATE, "phi4_im"), (PHI4_MINI_TEMPLATE, "phi4_mini"),
-                               (CHATML_TEMPLATE, "chatml"), (LLAMA3_TEMPLATE, "llama3"), (DEEPSEEK_TEMPLATE, "deepseek")):
+                               (CHATML_TEMPLATE, "chatml"), (LLAMA3_TEMPLATE, "llama3"), (DEEPSEEK_TEMPLATE, "deepseek"),
+                               (GEMMA2_TEMPLATE, "gemma"), (MISTRAL_V02_TEMPLATE, "mistral_v02"),
+                               (MISTRAL_V03_TEMPLATE, "mistral")):
             self.assertEqual(classify_chat_template(text), expected, text[:60])
 
     def test_unknown_or_empty_template_is_none(self):
         self.assertIsNone(classify_chat_template(""))
         self.assertIsNone(classify_chat_template(None))
-        self.assertIsNone(classify_chat_template(GEMMA_TEMPLATE))
+        self.assertIsNone(classify_chat_template(UNKNOWN_TEMPLATE))
+        self.assertIsNone(classify_chat_template(LLAMA2_TEMPLATE))  # [INST] but Llama 2's format, not Mistral's
 
 
 class TestReadChatTemplate(unittest.TestCase):
@@ -149,8 +182,99 @@ class TestReadChatTemplate(unittest.TestCase):
 
     def test_resolve_falls_back_to_the_name(self):
         self.assertEqual(resolve_template("qwen2.5-coder", "qwen2", self.dir), ("chatml", "name"))
-        self.write("tokenizer_config.json", {"chat_template": GEMMA_TEMPLATE})  # a template Prism has no format for
+        self.write("tokenizer_config.json", {"chat_template": UNKNOWN_TEMPLATE})  # a template Prism has no format for
         self.assertEqual(resolve_template("llama-3.2-3b", "", self.dir), ("llama3", "name"))
+
+
+CONVERSATION = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}, {"role": "user", "content": "Bye"}]
+
+
+class ModelFolder(unittest.TestCase):
+    """A model folder holding a chat template and a tokenizer config; `resolved` is what the catalog would return for it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def folder(self, template, template_name, **tokenizer_config):
+        with open(os.path.join(self.dir, "tokenizer_config.json"), "w") as f:
+            json.dump({"chat_template": template, **tokenizer_config}, f)
+        return {"id": "m", "path": self.dir, "template": template_name}
+
+
+@unittest.skipUnless(jinja_available(), "needs the optional jinja2")
+class TestJinjaRendering(ModelFolder):
+    def test_rendered_prompt_equals_the_builtin_format_for_real_templates(self):
+        for text, name, tokens in ((PHI35_TEMPLATE, "phi4", {"eos_token": "<|endoftext|>"}),
+                                   (PHI4_TEMPLATE, "phi4_im", {}),
+                                   (PHI4_MINI_TEMPLATE, "phi4_mini", {"eos_token": "<|endoftext|>"}),
+                                   (MISTRAL_V02_TEMPLATE, "mistral_v02", {"bos_token": "<s>", "eos_token": "</s>", "add_bos_token": True}),
+                                   (GEMMA2_TEMPLATE, "gemma", {"bos_token": "<bos>", "add_bos_token": True})):
+            resolved = self.folder(text, name, **tokens)
+            self.assertEqual(render_prompt(resolved, CONVERSATION), format_prompt(CONVERSATION, name), name)
+
+    def test_leading_bos_is_dropped_only_when_the_tokenizer_adds_it(self):
+        text = "{{ bos_token }}{% for m in messages %}{{ m['content'] }}{% endfor %}"
+        resolved = self.folder(text, "chatml", bos_token="<s>", add_bos_token=True)
+        self.assertEqual(render_prompt(resolved, CONVERSATION), "HiHelloBye")
+        resolved = self.folder(text, "chatml", bos_token="<s>", add_bos_token=False)
+        self.assertEqual(render_prompt(resolved, CONVERSATION), "<s>HiHelloBye")
+
+    def test_bos_token_may_be_an_object(self):
+        self.folder("x", "chatml", bos_token={"content": "<|begin|>"}, eos_token={"content": "<|end|>"}, add_bos_token=True)
+        self.assertEqual(read_tokenizer_tokens(self.dir), ("<|begin|>", "<|end|>", True))
+
+    def test_a_template_that_refuses_the_conversation_falls_back_to_the_builtin_format(self):
+        system = [{"role": "system", "content": "S"}] + CONVERSATION[:1]
+        resolved = self.folder(GEMMA2_TEMPLATE, "gemma", bos_token="<bos>", add_bos_token=True)  # Gemma 2 raises on a system role
+        with self.assertLogs("prism.templates", "WARNING"):
+            out = render_prompt(resolved, system)
+        self.assertEqual(out, format_prompt(system, "gemma"))
+
+    def test_the_sandbox_blocks_attribute_tricks(self):
+        evil = "{{ ''.__class__.__mro__[1].__subclasses__() }}"
+        with self.assertRaises(Exception):
+            render_chat_template(evil, CONVERSATION)
+        resolved = self.folder(evil, "chatml")
+        with self.assertLogs("prism.templates", "WARNING"):
+            self.assertEqual(render_prompt(resolved, CONVERSATION), format_prompt(CONVERSATION, "chatml"))
+
+    def test_tools_reach_the_template_and_tojson_is_not_html_escaped(self):
+        text = "{% for t in tools %}{{ t | tojson }}{% endfor %}"
+        out = render_chat_template(text, [], tools=[{"name": "a<b", "é": 1}])
+        self.assertEqual(out, '{"name": "a<b", "é": 1}')
+
+    def test_content_parts_are_flattened_before_rendering(self):
+        resolved = self.folder(CHATML_TEMPLATE, "chatml")
+        out = render_prompt(resolved, [{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+        self.assertEqual(out, "<|im_start|>user\nhi<|im_end|>\n")
+
+
+class TestTemplateModes(ModelFolder):
+    def test_builtin_mode_ignores_the_models_template(self):
+        resolved = self.folder("{{ 'RENDERED' }}", "chatml")
+        with patch.dict(os.environ, {"PRISM_TEMPLATE": "builtin"}):
+            self.assertEqual(render_prompt(resolved, CONVERSATION), format_prompt(CONVERSATION, "chatml"))
+
+    def test_without_jinja2_the_builtin_format_is_used(self):
+        resolved = self.folder("{{ 'RENDERED' }}", "chatml")
+        with patch("prism.templates.jinja_available", return_value=False):
+            self.assertEqual(render_prompt(resolved, CONVERSATION), format_prompt(CONVERSATION, "chatml"))
+            with patch.dict(os.environ, {"PRISM_TEMPLATE": "jinja"}), self.assertLogs("prism.templates", "WARNING"):
+                self.assertEqual(render_prompt(resolved, CONVERSATION), format_prompt(CONVERSATION, "chatml"))
+
+    def test_a_model_without_a_template_uses_the_builtin_format(self):
+        self.assertEqual(render_prompt({"id": "m", "path": self.dir, "template": "llama3"}, CONVERSATION),
+                         format_prompt(CONVERSATION, "llama3"))
+        self.assertEqual(render_prompt({"id": "m", "template": "llama3"}, CONVERSATION),  # no path at all
+                         format_prompt(CONVERSATION, "llama3"))
+
+    def test_template_mode_validation(self):
+        with patch.dict(os.environ, {"PRISM_TEMPLATE": "nope"}):
+            with self.assertRaises(ValueError):
+                template_mode()
+        with patch.dict(os.environ, {"PRISM_TEMPLATE": " JINJA "}):
+            self.assertEqual(template_mode(), "jinja")
 
 
 if __name__ == "__main__":

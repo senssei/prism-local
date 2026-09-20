@@ -63,6 +63,7 @@ curl -s http://127.0.0.1:5272/v1/chat/completions -H 'Content-Type: application/
 | `prism status` / `prism doctor` | GPU and environment diagnostics; `doctor` also tests whether the CUDA provider can load |
 | `prism list` | Local ONNX models plus installed Ollama models |
 | `prism pull <model>` | Hugging Face ONNX (`phi-4-mini`, `owner/repo`) or Ollama (`ollama:qwen2.5-coder:7b`) |
+| `prism convert <model>` | Convert and quantize a Hugging Face model to ONNX GenAI with the model builder (optional `convert` extra) |
 | `prism run <model> [prompt]` | One-shot completion (reads stdin; no prompt starts chat) |
 | `prism chat <model>` | Interactive streaming chat |
 | `prism serve` | OpenAI-compatible REST server |
@@ -78,9 +79,11 @@ curl -s http://127.0.0.1:5272/v1/chat/completions -H 'Content-Type: application/
 |---|---|---|
 | `PRISM_MODEL_DIRS` | `:`-separated model directories; the first is where `pull` writes | `~/.prism/models` |
 | `PRISM_DEVICE` | `auto`, `cuda` or `cpu` | `auto` |
+| `PRISM_TEMPLATE` | `auto`, `jinja` or `builtin`: render each model's own Jinja chat template (needs `prism-local[jinja]`) | `auto` |
 | `PRISM_API_KEY` | Bearer token for `serve`; also used by the MCP client | unset (no auth) |
 | `OLLAMA_HOST` | Ollama daemon address | `http://localhost:11434` |
 | `PRISM_BASE_URL` | Server URL used by `prism mcp` | `http://localhost:5272/v1` |
+| `PRISM_QUEUE_TIMEOUT` | Seconds a request may wait for the model before `503` (`0` = forever) | `300` |
 | `PRISM_PYTHON` | Interpreter used by `bin/prism` | see above |
 
 Models in the Foundry Local cache (`~/.foundry/cache/models`) are also discovered.
@@ -125,7 +128,7 @@ it really used, and `prism doctor` shows a CUDA library mismatch.
   missing library.
 - One ONNX model is resident at a time and requests are serialized (a lock), so this is a single-user local server, not a
   high-concurrency one.
-- No embeddings or tool calling on `/v1/chat/completions` yet.
+- No embeddings from ONNX models (`/v1/embeddings` is served by Ollama), and tool calling on ONNX models needs `prism-local[jinja]` and a chat template that takes tools.
 - Chat templates are detected from the model name and `genai_config.json` (Phi, Qwen/ChatML, Llama 3, DeepSeek); unknown
   families fall back to ChatML and may need a template added.
 - Linux and WSL2 only.

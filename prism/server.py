@@ -4,23 +4,28 @@ Provides predictable static port serving (default: 5272), SSE streaming,
 and multi-engine routing between ONNX Runtime GenAI and Ollama.
 """
 
+import base64
 import contextlib
 import hmac
 import http.server
 import json
 import logging
+import os
 import socketserver
+import struct
 import threading
 import time
+import urllib.error
 import uuid
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 from prism import PRISM_BANNER
 from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
-from prism.engine import Engine, OnnxGenAiEngine, format_prompt
-from prism.ollama_bridge import stream_ollama_chat
+from prism.engine import Engine, OnnxGenAiEngine
+from prism.ollama_bridge import embed_ollama, stream_ollama_chat
 from prism.telemetry import get_gpu_info
-from prism.templates import flatten_content
+from prism.templates import flatten_content, render_prompt, supports_tools
+from prism.tools import arguments_as_objects, parse_tool_calls, to_openai_tool_calls
 
 logger = logging.getLogger("prism.server")
 
@@ -28,20 +33,44 @@ MAX_BODY_BYTES = 10 * 1024 * 1024
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
+DEFAULT_QUEUE_TIMEOUT_SEC = 300.0
+
+
+def default_queue_timeout() -> Optional[float]:
+    """Seconds a request may wait for the engine: $PRISM_QUEUE_TIMEOUT (`0` = wait forever), default 300."""
+    raw = os.environ.get("PRISM_QUEUE_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_QUEUE_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if value < 0:
+        raise ValueError(f"PRISM_QUEUE_TIMEOUT must be a number of seconds >= 0 (got '{raw}')")
+    return value or None
+
+
+class EngineBusyError(RuntimeError):
+    """The engine stayed busy with other requests for longer than the queue timeout."""
+
+
 class ActiveEngineManager:
     """
     Owns the single active ONNX engine. A lock serializes model swaps and generation:
     ORT-GenAI engines are not safe to share across threads, and unloading a model
-    while another request is mid-generation would crash.
+    while another request is mid-generation would crash. A request that cannot get the lock
+    within `queue_timeout` seconds (None: wait as long as it takes) fails with EngineBusyError.
     """
 
     def __init__(
         self,
         catalog: Optional[ModelCatalog] = None,
         engine_factory: Callable[[str], Engine] = OnnxGenAiEngine,
+        queue_timeout: Optional[float] = None,
     ):
         self.catalog = catalog or ModelCatalog()
         self.engine_factory = engine_factory
+        self.queue_timeout = queue_timeout
         self.current_model_id: Optional[str] = None
         self.engine: Optional[Engine] = None
         self.lock = threading.Lock()
@@ -49,7 +78,9 @@ class ActiveEngineManager:
     @contextlib.contextmanager
     def use_engine(self, resolved: Dict[str, Any]) -> Iterator[Engine]:
         """Holds the lock for the duration of the block and yields a loaded engine."""
-        with self.lock:
+        if not self.lock.acquire(timeout=self.queue_timeout if self.queue_timeout else -1):
+            raise EngineBusyError(f"the model has been busy with other requests for more than {self.queue_timeout:g} s")
+        try:
             if self.engine is None or self.current_model_id != resolved["id"]:
                 if self.engine is not None:
                     self.engine.unload()
@@ -58,6 +89,8 @@ class ActiveEngineManager:
                 self.engine = self.engine_factory(resolved["path"])
                 self.current_model_id = resolved["id"]
             yield self.engine
+        finally:
+            self.lock.release()
 
     def unload(self) -> None:
         with self.lock:
@@ -71,12 +104,14 @@ ENGINE_MANAGER = ActiveEngineManager()
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, message: str, err_type: str = "invalid_request_error", code: Optional[str] = None):
+    def __init__(self, status: int, message: str, err_type: str = "invalid_request_error", code: Optional[str] = None,
+                 headers: Optional[Dict[str, str]] = None):
         super().__init__(message)
         self.status = status
         self.message = message
         self.err_type = err_type
         self.code = code
+        self.headers = headers or {}
 
 
 class PrismHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -122,6 +157,7 @@ def _float_param(req: Dict[str, Any], key: str, default: float) -> float:
 
 
 MAX_STOP_SEQUENCES = 4  # OpenAI's limit
+MAX_EMBEDDING_INPUTS = 256
 
 
 def _stop_param(req: Dict[str, Any]) -> List[str]:
@@ -134,6 +170,41 @@ def _stop_param(req: Dict[str, Any]) -> List[str]:
             or not all(isinstance(x, str) and x for x in stops)):
         raise ApiError(400, f"'stop' must be a non-empty string or a list of up to {MAX_STOP_SEQUENCES} non-empty strings")
     return stops
+
+
+def _tools_param(req: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """`tools` as OpenAI sends them (`[{"type": "function", "function": {"name", ...}}]`), or None when absent or when `tool_choice` is "none".
+    Other `tool_choice` values are treated as "auto": Prism cannot force a call."""
+    tools = req.get("tools")
+    if tools is None or tools == []:
+        return None
+    ok = isinstance(tools, list) and all(
+        isinstance(t, dict) and t.get("type") == "function" and isinstance(t.get("function"), dict)
+        and isinstance(t["function"].get("name"), str) and t["function"]["name"] for t in tools)
+    if not ok:
+        raise ApiError(400, "'tools' must be a list of {\"type\": \"function\", \"function\": {\"name\": ...}} objects")
+    return None if req.get("tool_choice") == "none" else tools
+
+
+def _ollama_error_detail(err: "urllib.error.HTTPError") -> str:
+    """Ollama's own `{"error": "..."}` message from an HTTP error reply, else the status line."""
+    try:
+        message = json.loads(err.read().decode("utf-8", "replace")).get("error")
+    except Exception:
+        message = None
+    return message if isinstance(message, str) and message else str(err)
+
+
+def _ollama_message(m: Dict[str, Any]) -> Dict[str, Any]:
+    """An OpenAI message as Ollama wants it: plain-text content, tool calls with object arguments."""
+    out: Dict[str, Any] = {"role": m.get("role", "user"), "content": flatten_content(m.get("content"))}
+    calls = m.get("tool_calls")
+    if isinstance(calls, list):
+        out["tool_calls"] = [{"function": {"name": c["function"]["name"], "arguments": c["function"].get("arguments") or {}}}
+                             for c in calls if isinstance(c, dict) and isinstance(c.get("function"), dict) and c["function"].get("name")]
+    if out["role"] == "tool" and isinstance(m.get("name"), str):
+        out["tool_name"] = m["name"]
+    return out
 
 
 class StopMatcher:
@@ -221,10 +292,12 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
             self.send_header("Vary", "Origin")
 
-    def _send_json(self, status: int, obj: Any):
+    def _send_json(self, status: int, obj: Any, headers: Optional[Dict[str, str]] = None):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(status)
         self._send_cors_headers()
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -233,7 +306,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
     def _send_api_error(self, err: ApiError):
         self._send_json(err.status, {
             "error": {"message": err.message, "type": err.err_type, "param": None, "code": err.code}
-        })
+        }, err.headers)
 
     def _check_host(self):
         """Rejects foreign Host headers on loopback binds (DNS-rebinding defence)."""
@@ -315,6 +388,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
         self._dispatch({
             "/v1/chat/completions": self._handle_chat_completions,
             "/v1/completions": self._handle_completions,
+            "/v1/embeddings": self._handle_embeddings,
         })
 
     def _handle_list_models(self):
@@ -360,11 +434,16 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
         if not isinstance(messages, list) or not messages or not all(isinstance(m, dict) for m in messages):
             raise ApiError(400, "'messages' must be a non-empty list of message objects")
         model_id = req.get("model")
+        tools = _tools_param(req)
         resolved = self._resolve(model_id)
+        if tools and resolved.get("backend") == "onnx" and not supports_tools(resolved):
+            raise ApiError(400, f"Model '{model_id}' cannot take tools: Prism needs the model's own chat template with tool support "
+                                "and the 'jinja' extra (pip install 'prism-local[jinja]'). Ollama models handle tools themselves.",
+                           code="tools_not_supported")
         self._generate(
             resolved=resolved,
             model_id=model_id,
-            messages=messages,
+            messages=arguments_as_objects(messages),
             stream=bool(req.get("stream", False)),
             max_tokens=_int_param(req, ("max_completion_tokens", "max_tokens"), 512),
             temperature=_float_param(req, "temperature", 0.1),
@@ -372,7 +451,46 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             chat=True,
             include_usage=_include_usage(req),
             stop=_stop_param(req),
+            tools=tools,
         )
+
+    def _handle_embeddings(self):
+        """OpenAI's /v1/embeddings, served by Ollama: ONNX Runtime GenAI does not produce embeddings."""
+        req = self._read_json_body()
+        inputs = req.get("input")
+        if isinstance(inputs, str):
+            inputs = [inputs]
+        if (not isinstance(inputs, list) or not inputs or len(inputs) > MAX_EMBEDDING_INPUTS
+                or not all(isinstance(x, str) and x for x in inputs)):
+            raise ApiError(400, f"'input' must be a non-empty string or a list of 1 to {MAX_EMBEDDING_INPUTS} non-empty strings "
+                                "(token arrays are not supported)")
+        encoding = req.get("encoding_format", "float")
+        if encoding not in ("float", "base64"):
+            raise ApiError(400, "'encoding_format' must be 'float' or 'base64'")
+        if req.get("dimensions") is not None:
+            raise ApiError(400, "'dimensions' is not supported", code="dimensions_not_supported")
+        model_id = req.get("model")
+        resolved = self._resolve(model_id)
+        if resolved.get("backend") != "ollama":
+            raise ApiError(400, f"Model '{model_id}' cannot produce embeddings: ONNX Runtime GenAI does not support them. "
+                                "Use an Ollama embedding model, e.g. 'ollama:nomic-embed-text'.", code="embeddings_not_supported")
+        try:
+            vectors, prompt_tokens = embed_ollama(resolved["id"], inputs)
+        except urllib.error.HTTPError as ex:
+            detail = _ollama_error_detail(ex)
+            if ex.code == 404:
+                raise ApiError(404, f"Model '{model_id}' not found in Ollama", "not_found_error", "model_not_found")
+            if ex.code in (400, 501):  # the daemon refuses: the model is not an embedding model
+                raise ApiError(400, f"Ollama cannot produce embeddings with '{model_id}': {detail}. "
+                                    "Use an embedding model such as 'ollama:nomic-embed-text'.", code="embeddings_not_supported")
+            raise ApiError(502, f"Ollama backend error: {detail}", "server_error", "backend_unavailable")
+        except Exception as ex:
+            raise ApiError(502, f"Ollama backend error: {ex}", "server_error", "backend_unavailable")
+        data = [{"object": "embedding", "index": i,
+                 "embedding": base64.b64encode(struct.pack(f"<{len(v)}f", *v)).decode("ascii") if encoding == "base64" else v}
+                for i, v in enumerate(vectors)]
+        self._send_json(200, {"object": "list", "data": data, "model": model_id,
+                              "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens}})
 
     def _handle_completions(self):
         req = self._read_json_body()
@@ -398,18 +516,21 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _generate(self, resolved, model_id, messages, stream, max_tokens, temperature, top_p, chat, raw_prompt=None,
-                  include_usage=False, stop=()):
+                  include_usage=False, stop=(), tools=None):
         obj = "chat.completion" if chat else "text_completion"
         cmpl_id = f"{'chatcmpl' if chat else 'cmpl'}-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
 
-        def chunk(delta_text: Optional[str], finish: Optional[str], role: bool = False) -> Dict[str, Any]:
+        def chunk(delta_text: Optional[str], finish: Optional[str], role: bool = False,
+                  tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
             if chat:
                 delta: Dict[str, Any] = {}
                 if role:
                     delta["role"] = "assistant"
                 if delta_text is not None:
                     delta["content"] = delta_text
+                if tool_calls:
+                    delta["tool_calls"] = tool_calls
                 choice = {"index": 0, "delta": delta, "finish_reason": finish}
             else:
                 choice = {"index": 0, "text": delta_text or "", "finish_reason": finish}
@@ -417,8 +538,12 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                     "model": model_id, "choices": [choice]}
 
         def final(text: str, finish: str, prompt_tokens: Optional[int], completion_tokens: Optional[int],
-                  telemetry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            if chat:
+                  telemetry: Optional[Dict[str, Any]] = None,
+                  tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+            if chat and tool_calls:
+                message = {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
+                choice = {"index": 0, "message": message, "finish_reason": finish}
+            elif chat:
                 choice = {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": finish}
             else:
                 choice = {"index": 0, "text": text, "finish_reason": finish}
@@ -445,13 +570,22 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
 
         if resolved.get("backend") == "ollama":
             self._generate_ollama(resolved, messages, stream, max_tokens, temperature, top_p, stop, include_usage,
-                                  chunk, final, usage_chunk)
+                                  chunk, final, usage_chunk, tools)
             return
 
-        prompt = raw_prompt if raw_prompt is not None else format_prompt(messages, resolved.get("template"))
+        def resolve_tools(text: str, finish: str):
+            """(text, finish_reason, tool_calls): when the model called a tool, the calls are split out of the text."""
+            if not tools:
+                return text, finish, None
+            content, calls = parse_tool_calls(text)
+            return (content, "tool_calls", to_openai_tool_calls(calls)) if calls else (text, finish, None)
+
+        prompt = raw_prompt if raw_prompt is not None else render_prompt(resolved, messages, tools)
         stack = contextlib.ExitStack()
         try:
             engine = stack.enter_context(self.manager.use_engine(resolved))
+        except EngineBusyError as ex:
+            raise ApiError(503, f"Server busy: {ex}", "server_error", "server_busy", {"Retry-After": "30"})
         except Exception as ex:
             logger.exception("failed to load model %s", resolved.get("id"))
             raise ApiError(500, f"Failed to load model '{model_id}': {ex}", "server_error", "model_load_failed")
@@ -466,10 +600,11 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 max_tokens = min(max_tokens, window - prompt_tokens)  # the room left; hitting it reports finish_reason "length"
             if not stream and not stop:
                 result = engine.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
+                text, finish, calls = resolve_tools(result["text"], result.get("finish_reason", "stop"))
                 self._send_json(200, final(
-                    result["text"], result.get("finish_reason", "stop"), prompt_tokens, result["tokens_generated"],
+                    text, finish, prompt_tokens, result["tokens_generated"],
                     {"ttft_sec": result["ttft_sec"], "decode_tok_per_sec": result["decode_tok_per_sec"],
-                     "device": result.get("device")},
+                     "device": result.get("device")}, calls,
                 ))
                 return
 
@@ -486,17 +621,27 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                     text = "".join(pieces)
                 finally:
                     gen.close()
-                finish = "stop" if stats["stopped"] else engine.last_finish_reason
-                self._send_json(200, final(text, finish, prompt_tokens, stats["tokens"], telemetry()))
+                text, finish, calls = resolve_tools(text, "stop" if stats["stopped"] else engine.last_finish_reason)
+                self._send_json(200, final(text, finish, prompt_tokens, stats["tokens"], telemetry(), calls))
                 return
 
             self._begin_sse()
             try:
                 if chat:
                     self._sse(chunk(None, None, role=True))
-                for piece in pieces:
-                    self._sse(chunk(piece, None))
-                self._sse(chunk(None, "stop" if stats["stopped"] else engine.last_finish_reason))
+                if tools:
+                    # A call can only be recognised in the finished text, so with tools the reply is not streamed token by token.
+                    text = "".join(pieces)
+                    text, finish, calls = resolve_tools(text, "stop" if stats["stopped"] else engine.last_finish_reason)
+                    if text:
+                        self._sse(chunk(text, None))
+                    if calls:
+                        self._sse(chunk(None, None, tool_calls=[{"index": i, **c} for i, c in enumerate(calls)]))
+                    self._sse(chunk(None, finish))
+                else:
+                    for piece in pieces:
+                        self._sse(chunk(piece, None))
+                    self._sse(chunk(None, "stop" if stats["stopped"] else engine.last_finish_reason))
                 if include_usage:
                     self._sse(usage_chunk(prompt_tokens, stats["tokens"], telemetry()))
                 self.wfile.write(b"data: [DONE]\n\n")
@@ -510,14 +655,13 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 gen.close()
 
     def _generate_ollama(self, resolved, messages, stream, max_tokens, temperature, top_p, stop, include_usage,
-                         chunk, final, usage_chunk):
+                         chunk, final, usage_chunk, tools=None):
         options: Dict[str, Any] = {"num_predict": max_tokens, "temperature": temperature, "top_p": top_p}
         if stop:
             options["stop"] = list(stop)  # Ollama applies stop sequences itself
-        # Ollama wants plain-text content; OpenAI clients may send a list of parts.
-        text_messages = [{"role": m.get("role", "user"), "content": flatten_content(m.get("content"))} for m in messages]
+        text_messages = [_ollama_message(m) for m in messages]  # Ollama wants plain-text content and object arguments
         stats: Dict[str, Any] = {}
-        it = stream_ollama_chat(resolved["id"], text_messages, options, stats=stats)
+        it = stream_ollama_chat(resolved["id"], text_messages, options, stats=stats, tools=tools)
         try:
             first = next(it, None)  # surface connection errors before any headers are sent
         except Exception as ex:
@@ -533,8 +677,9 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 text = "".join(chunks())
             except Exception as ex:
                 raise ApiError(502, f"Ollama backend error: {ex}", "server_error", "backend_unavailable")
-            self._send_json(200, final(text, stats.get("finish_reason", "stop"),
-                                       stats.get("prompt_tokens"), stats.get("completion_tokens")))
+            calls = to_openai_tool_calls(stats["tool_calls"]) if stats.get("tool_calls") else None
+            self._send_json(200, final(text, "tool_calls" if calls else stats.get("finish_reason", "stop"),
+                                       stats.get("prompt_tokens"), stats.get("completion_tokens"), None, calls))
             return
 
         self._begin_sse()
@@ -542,7 +687,10 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             self._sse(chunk(None, None, role=True))
             for piece in chunks():
                 self._sse(chunk(piece, None))
-            self._sse(chunk(None, stats.get("finish_reason", "stop")))
+            calls = to_openai_tool_calls(stats["tool_calls"], with_index=True) if stats.get("tool_calls") else None
+            if calls:
+                self._sse(chunk(None, None, tool_calls=calls))
+            self._sse(chunk(None, "tool_calls" if calls else stats.get("finish_reason", "stop")))
             if include_usage and "prompt_tokens" in stats and "completion_tokens" in stats:
                 self._sse(usage_chunk(stats["prompt_tokens"], stats["completion_tokens"]))
             self.wfile.write(b"data: [DONE]\n\n")
@@ -597,9 +745,11 @@ def start_server(
     host: str = "127.0.0.1",
     api_key: Optional[str] = None,
     cors_origins: Sequence[str] = (),
+    queue_timeout: Optional[float] = None,
 ):
-    """Launches the multi-threaded OpenAI REST server."""
+    """Launches the multi-threaded OpenAI REST server. `queue_timeout`: seconds a request may wait for the engine (None: forever)."""
     server = create_server(port=port, host=host, api_key=api_key, cors_origins=cors_origins)
+    server.manager.queue_timeout = queue_timeout
     with server:
         print(f"\n{PRISM_BANNER}\n")
         print(f"🚀 prism OpenAI Server active at http://{host}:{server.server_address[1]}/v1")

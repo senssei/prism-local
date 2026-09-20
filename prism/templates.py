@@ -3,10 +3,15 @@ prism.templates: Chat prompt templates and per-model template detection.
 Kept free of heavy imports so the catalog can use it without loading ONNX Runtime.
 """
 
+import datetime
 import functools
 import json
+import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("prism.templates")
 
 DEFAULT_TEMPLATE = "phi4"
 
@@ -18,6 +23,10 @@ _MAX_TEMPLATE_FILE_BYTES = 4 * 1024 * 1024
 def detect_template(name: str = "", model_type: str = "") -> str:
     """Picks a chat template from the model name and genai_config `model.type`."""
     hint = f"{name} {model_type}".lower()
+    if "gemma" in hint:
+        return "gemma"
+    if "mistral" in hint or "mixtral" in hint:
+        return "mistral_v02" if re.search(r"v0[._-]?[12]\b", hint) else "mistral"
     if any(tag in hint for tag in ("phi-4", "phi4", "phi_4")):
         return "phi4_mini" if "mini" in hint else "phi4_im"
     if "phi" in hint:
@@ -75,6 +84,11 @@ def classify_chat_template(chat_template: str) -> Optional[str]:
         return "deepseek"
     if "<|start_header_id|>" in t:
         return "llama3"
+    if "<start_of_turn>" in t:
+        return "gemma"
+    if "[INST]" in t and "<<SYS>>" not in t:  # not Llama 2, which has its own <<SYS>> block
+        # v0.1/v0.2 put a space before [/INST] and none after it; v0.3 and later the reverse
+        return "mistral_v02" if " [/INST]" in t else "mistral"
     if "<|im_sep|>" in t:  # Phi-4: <|im_start|>role<|im_sep|>..., which is not ChatML
         return "phi4_im"
     if "<|im_start|>" in t:
@@ -91,6 +105,126 @@ def resolve_template(name: str, model_type: str, model_dir: str) -> Tuple[str, s
     if found:
         return found, "chat_template"
     return detect_template(name, model_type), "name"
+
+
+# --------------------------------------------------------------------------- rendering the model's own Jinja template
+
+TEMPLATE_MODES = ("auto", "jinja", "builtin")
+
+
+def template_mode() -> str:
+    """$PRISM_TEMPLATE: `auto` (render the model's Jinja chat template when jinja2 is installed), `jinja` (same, but warn when
+    it cannot) or `builtin` (only Prism's own formats). Default `auto`."""
+    value = os.environ.get("PRISM_TEMPLATE", "auto").strip().lower() or "auto"
+    if value not in TEMPLATE_MODES:
+        raise ValueError(f"PRISM_TEMPLATE must be one of {', '.join(TEMPLATE_MODES)} (got '{value}')")
+    return value
+
+
+def jinja_available() -> bool:
+    try:
+        import jinja2  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+class TemplateError(ValueError):
+    """A chat template rejected the conversation (its own `raise_exception`, or a construct the sandbox forbids)."""
+
+
+@functools.lru_cache(maxsize=1)
+def _jinja_env():
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    def raise_exception(message):
+        raise TemplateError(message)
+
+    # Chat templates come from downloaded files, so they run in the sandbox: no attribute tricks, no mutation of the inputs.
+    env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
+    env.globals["raise_exception"] = raise_exception
+    env.globals["strftime_now"] = lambda fmt: datetime.datetime.now().strftime(fmt)
+    env.filters["tojson"] = lambda value, ensure_ascii=False, indent=None, **_: json.dumps(
+        value, ensure_ascii=ensure_ascii, indent=indent)  # as Hugging Face does: not Jinja's HTML-escaping tojson
+    return env
+
+
+@functools.lru_cache(maxsize=32)
+def _compile_template(text: str):
+    return _jinja_env().from_string(text)
+
+
+@functools.lru_cache(maxsize=256)
+def _read_tokenizer_tokens(path: str, mtime_ns: int, size: int) -> Tuple[str, str, bool]:
+    """(bos_token, eos_token, add_bos_token) from tokenizer_config.json. `mtime_ns` and `size` only key the cache."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return "", "", False
+    if not isinstance(cfg, dict):
+        return "", "", False
+
+    def token(value):  # a string, or {"content": "<s>", ...}
+        if isinstance(value, dict):
+            value = value.get("content")
+        return value if isinstance(value, str) else ""
+
+    return token(cfg.get("bos_token")), token(cfg.get("eos_token")), cfg.get("add_bos_token") is True
+
+
+def read_tokenizer_tokens(model_dir: str) -> Tuple[str, str, bool]:
+    path = os.path.join(model_dir, "tokenizer_config.json")
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "", "", False
+    return _read_tokenizer_tokens(path, st.st_mtime_ns, st.st_size)
+
+
+def render_chat_template(text: str, messages: List[Dict[str, Any]], *, bos_token: str = "", eos_token: str = "",
+                         tools: Optional[List[Dict[str, Any]]] = None, add_generation_prompt: bool = True) -> str:
+    """Renders a Hugging Face style Jinja chat template. Raises TemplateError (or a jinja2 error) when the template cannot take the messages."""
+    return _compile_template(text).render(messages=messages, tools=tools, add_generation_prompt=add_generation_prompt,
+                                          bos_token=bos_token, eos_token=eos_token)
+
+
+def render_prompt(resolved: Dict[str, Any], messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> str:
+    """The prompt for `messages` on the model `resolved` (a catalog entry): its own Jinja chat template when it has one and jinja2
+    is installed, else Prism's built-in format for the detected family. A template that fails is logged and replaced by the
+    built-in format, which is more forgiving (it folds a system prompt into a user turn where the template refuses one)."""
+    builtin = lambda: format_prompt(messages, resolved.get("template"))  # noqa: E731
+    mode = template_mode()
+    path = resolved.get("path")
+    if mode == "builtin" or not path:
+        return builtin()
+    text = read_chat_template(path)
+    if not text:
+        return builtin()
+    if not jinja_available():
+        if mode == "jinja":
+            logger.warning("PRISM_TEMPLATE=jinja needs jinja2 (pip install 'prism-local[jinja]'); using the built-in template")
+        return builtin()
+    bos, eos, add_bos = read_tokenizer_tokens(path)
+    try:
+        out = render_chat_template(text, [{**m, "content": flatten_content(m.get("content"))} for m in messages],
+                                   bos_token=bos, eos_token=eos, tools=tools)
+    except Exception as ex:
+        logger.warning("chat template of %s failed (%s); using the built-in '%s' format", resolved.get("id"), ex,
+                       resolved.get("template"))
+        return builtin()
+    if add_bos and bos and out.startswith(bos):
+        out = out[len(bos):]  # the tokenizer adds BOS itself; a second one would confuse the model
+    return out
+
+
+def supports_tools(resolved: Dict[str, Any]) -> bool:
+    """Whether Prism can put tool definitions into this model's prompts: it renders the model's own Jinja template (the `jinja` extra),
+    and that template uses `tools`."""
+    if template_mode() == "builtin" or not jinja_available():
+        return False
+    text = read_chat_template(resolved.get("path") or "")
+    return bool(text) and re.search(r"\btools\b", text) is not None
 
 
 def flatten_content(content: Any) -> str:
@@ -133,6 +267,29 @@ def format_prompt(messages: List[Dict[str, str]], template: Optional[str] = None
         for role, content in turns:
             out += f"<|{role}|>\n{content}<|end|>\n"
         out += "<|assistant|>\n"
+        return out
+    if template == "gemma":
+        # Gemma has no system role: the system prompt leads the first user turn. BOS is left to the tokenizer.
+        out, pending = "", system_msg
+        for role, content in turns:
+            role = "model" if role == "assistant" else "user"
+            content = content.strip()
+            if pending and role == "user":
+                content, pending = f"{pending}\n\n{content}", ""
+            out += f"<start_of_turn>{role}\n{content}<end_of_turn>\n"
+        return out + "<start_of_turn>model\n"
+    if template in ("mistral", "mistral_v02"):
+        # No system role either: it leads the last user message. BOS (<s>) is left to the tokenizer.
+        v02 = template == "mistral_v02"
+        last_user = max((i for i, (role, _) in enumerate(turns) if role != "assistant"), default=-1)
+        out = ""
+        for i, (role, content) in enumerate(turns):
+            if role == "assistant":
+                out += f"{content}</s>" if v02 else f" {content}</s>"
+            else:
+                if system_msg and i == last_user:
+                    content = f"{system_msg}\n\n{content}"
+                out += f"[INST] {content} [/INST]" if v02 else f"[INST] {content}[/INST]"
         return out
     if template == "phi4_mini":
         out = "".join(f"<|{role}|>{content}<|end|>" for role, content in (("system", system_msg),) if content)

@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from prism.catalog import ModelCatalog
+from prism.templates import jinja_available
 from prism.server import ActiveEngineManager, StopMatcher, create_server
 from tests.fakes import FakeEngine, make_model
 
@@ -251,6 +252,7 @@ class TestOllamaRouting(ServerTestBase):
 
         def fake_stream(model, messages, options=None, **kw):
             self.calls.append((model, messages, options))
+            self.call_kwargs = kw
             if getattr(self, "backend_error", None):
                 raise self.backend_error
             yield "Hi"
@@ -322,6 +324,35 @@ class TestOllamaRouting(ServerTestBase):
         _, messages, options = self.calls[-1]
         self.assertEqual(options["stop"], ["###"])
         self.assertEqual(messages, [{"role": "user", "content": "hello"}])
+
+
+    def test_tools_go_to_the_daemon_and_its_calls_come_back_in_openai_shape(self):
+        tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]
+        self.ollama_stats = {"tool_calls": [{"name": "get_weather", "arguments": {"city": "Paris"}}], "finish_reason": "stop"}
+        history = [{"role": "user", "content": "weather?"},
+                   {"role": "assistant", "content": None, "tool_calls": [
+                       {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Rome"}}}]},
+                   {"role": "tool", "name": "get_weather", "content": "sunny", "tool_call_id": "c1"}]
+        _, data = self.chat(model="tiny:1b", tools=tools, messages=history)
+        self.assertEqual(self.call_kwargs["tools"], tools)
+        _, sent, _ = self.calls[-1]
+        self.assertEqual(sent[1]["tool_calls"], [{"function": {"name": "get_weather", "arguments": {"city": "Rome"}}}])
+        self.assertEqual((sent[2]["role"], sent[2]["tool_name"]), ("tool", "get_weather"))
+        choice = data["choices"][0]
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        call = choice["message"]["tool_calls"][0]
+        self.assertEqual((call["function"]["name"], json.loads(call["function"]["arguments"])), ("get_weather", {"city": "Paris"}))
+
+    def test_streamed_tool_calls_arrive_as_an_indexed_delta(self):
+        self.ollama_stats = {"tool_calls": [{"name": "f", "arguments": {}}], "finish_reason": "stop"}
+        _, raw = self.request("POST", "/v1/chat/completions",
+                              {"model": "tiny:1b", "stream": True, "messages": [{"role": "user", "content": "x"}],
+                               "tools": [{"type": "function", "function": {"name": "f"}}]}, raw=True)
+        chunks = [json.loads(e[len("data: "):]) for e in raw.decode().strip().split("\n\n")[:-1]]
+        deltas = [c["choices"][0]["delta"] for c in chunks]
+        call = next(d["tool_calls"][0] for d in deltas if "tool_calls" in d)
+        self.assertEqual((call["index"], call["function"]["name"]), (0, "f"))
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "tool_calls")
 
 
 class TestStopMatcher(unittest.TestCase):
@@ -412,6 +443,229 @@ class TestContentParts(ServerTestBase):
         self.assertEqual(resp.status, 200)
         self.assertIn("hello", FakeEngine.prompts[-1])
         self.assertNotIn("image_url", FakeEngine.prompts[-1])
+
+
+class TestQueueTimeout(ServerTestBase):
+    def setUp(self):
+        super().setUp()
+        self.manager.queue_timeout = 0.3
+        FakeEngine.delay = 0.3  # a generation of three pieces takes about a second
+
+    def test_a_request_that_waits_too_long_gets_503_and_the_first_one_finishes(self):
+        first = {}
+        t = threading.Thread(target=lambda: first.update(zip(("resp", "data"), self.chat())))
+        t.start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not FakeEngine.active:
+            time.sleep(0.01)
+        resp, data = self.chat()
+        self.assertEqual((resp.status, data["error"]["code"]), (503, "server_busy"))
+        self.assertEqual(resp.getheader("Retry-After"), "30")
+        t.join(10)
+        self.assertEqual(first["resp"].status, 200)
+        self.assertEqual(first["data"]["choices"][0]["message"]["content"], "Hello world")
+        FakeEngine.delay = 0.01
+        resp, _ = self.chat()  # the lock is free again
+        self.assertEqual(resp.status, 200)
+
+    def test_no_limit_waits_for_its_turn(self):
+        self.manager.queue_timeout = None
+        FakeEngine.delay = 0.05
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(self.chat()[0].status)) for _ in range(3)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(10)
+        self.assertEqual(results, [200, 200, 200])
+        self.assertEqual(FakeEngine.max_active, 1)
+
+
+TOOL_TEMPLATE = ("{% if tools %}TOOLS:{% for t in tools %}{{ t.function.name }};{% endfor %}\n{% endif %}"
+                 "{% for m in messages %}{{ m.role }}:{{ m.content }}"
+                 "{% if m.tool_calls %} CALL:{{ m.tool_calls[0].function.arguments.city }}{% endif %}\n{% endfor %}")
+CALL_TEXT = ['<tool_call>{"name": "get_weather", ', '"arguments": {"city": "Paris"}}</tool_call>']
+WEATHER_TOOL = {"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}
+
+
+@unittest.skipUnless(jinja_available(), "tool calling on ONNX models needs the optional jinja2")
+class TestToolCalling(ServerTestBase):
+    def setUp(self):
+        super().setUp()
+        d = make_model(self.tmp, "tool-model", "qwen2")
+        with open(os.path.join(d, "tokenizer_config.json"), "w") as f:
+            json.dump({"chat_template": TOOL_TEMPLATE}, f)
+        FakeEngine.pieces = CALL_TEXT
+
+    def ask(self, **extra):
+        return self.chat(model="tool-model", tools=[WEATHER_TOOL], **extra)
+
+    def test_tools_reach_the_prompt_and_the_call_comes_back_in_openai_shape(self):
+        resp, data = self.ask()
+        self.assertEqual(resp.status, 200)
+        self.assertIn("TOOLS:get_weather;", FakeEngine.prompts[-1])
+        choice = data["choices"][0]
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertIsNone(choice["message"]["content"])
+        call = choice["message"]["tool_calls"][0]
+        self.assertTrue(call["id"].startswith("call_"))
+        self.assertEqual((call["type"], call["function"]["name"]), ("function", "get_weather"))
+        self.assertEqual(json.loads(call["function"]["arguments"]), {"city": "Paris"})
+        self.assertGreater(data["usage"]["prompt_tokens"], 0)
+
+    def test_streaming_is_buffered_and_ends_with_the_tool_calls_finish(self):
+        _, raw = self.request("POST", "/v1/chat/completions",
+                              {"model": "tool-model", "stream": True, "tools": [WEATHER_TOOL],
+                               "stream_options": {"include_usage": True},
+                               "messages": [{"role": "user", "content": "weather?"}]}, raw=True)
+        events = raw.decode().strip().split("\n\n")
+        self.assertEqual(events[-1], "data: [DONE]")
+        chunks = [json.loads(e[len("data: "):]) for e in events[:-1]]
+        deltas = [c["choices"][0]["delta"] for c in chunks if c["choices"]]
+        self.assertEqual(deltas[0], {"role": "assistant"})
+        call = next(d["tool_calls"][0] for d in deltas if "tool_calls" in d)
+        self.assertEqual((call["index"], call["function"]["name"]), (0, "get_weather"))
+        self.assertEqual(json.loads(call["function"]["arguments"]), {"city": "Paris"})
+        self.assertEqual([c for c in chunks if c["choices"]][-1]["choices"][0]["finish_reason"], "tool_calls")
+        self.assertIn("usage", chunks[-1])
+
+    def test_an_ordinary_answer_is_still_an_ordinary_answer(self):
+        FakeEngine.pieces = ["It is ", "sunny."]
+        _, data = self.ask()
+        self.assertEqual(data["choices"][0]["message"]["content"], "It is sunny.")
+        self.assertEqual(data["choices"][0]["finish_reason"], "stop")
+        self.assertNotIn("tool_calls", data["choices"][0]["message"])
+
+    def test_tool_choice_none_hides_the_tools(self):
+        _, data = self.ask(tool_choice="none")
+        self.assertNotIn("TOOLS:", FakeEngine.prompts[-1])
+        self.assertIn("<tool_call>", data["choices"][0]["message"]["content"])  # returned as text, not parsed
+
+    def test_a_tool_result_conversation_reaches_the_template_with_object_arguments(self):
+        history = [{"role": "user", "content": "weather?"},
+                   {"role": "assistant", "content": None, "tool_calls": [
+                       {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Rome"}'}}]},
+                   {"role": "tool", "tool_call_id": "c1", "content": "sunny"}]
+        FakeEngine.pieces = ["Sunny in Rome."]
+        resp, data = self.ask(messages=history)
+        self.assertEqual(resp.status, 200)
+        self.assertIn("assistant: CALL:Rome", FakeEngine.prompts[-1])
+        self.assertIn("tool:sunny", FakeEngine.prompts[-1])
+
+    def test_stop_sequences_still_apply_with_tools(self):
+        FakeEngine.pieces = ["Hello END", " tail"]
+        _, data = self.ask(stop="END")
+        self.assertEqual(data["choices"][0]["message"]["content"], "Hello ")
+
+
+class TestToolsRejected(ServerTestBase):
+    def test_a_model_whose_template_ignores_tools_is_a_400(self):
+        resp, data = self.chat(model="qwen-coder-gpu", tools=[WEATHER_TOOL])  # no chat_template at all
+        self.assertEqual((resp.status, data["error"]["code"]), (400, "tools_not_supported"))
+        self.assertEqual(FakeEngine.prompts, [])
+
+    def test_without_jinja_no_onnx_model_can_take_tools(self):
+        d = make_model(self.tmp, "tool-model", "qwen2")
+        with open(os.path.join(d, "tokenizer_config.json"), "w") as f:
+            json.dump({"chat_template": TOOL_TEMPLATE}, f)
+        with patch("prism.templates.jinja_available", return_value=False):
+            resp, data = self.chat(model="tool-model", tools=[WEATHER_TOOL])
+        self.assertEqual((resp.status, data["error"]["code"]), (400, "tools_not_supported"))
+
+    def test_tool_choice_none_needs_no_tool_support(self):
+        resp, _ = self.chat(model="qwen-coder-gpu", tools=[WEATHER_TOOL], tool_choice="none")
+        self.assertEqual(resp.status, 200)
+
+    def test_malformed_tools_are_a_400(self):
+        for bad in ("get_weather", [{"type": "function"}], [{"type": "retrieval", "function": {"name": "x"}}],
+                    [{"type": "function", "function": {"name": ""}}], {"a": 1}):
+            resp, data = self.chat(tools=bad)
+            self.assertEqual(resp.status, 400, bad)
+            self.assertIn("'tools'", data["error"]["message"])
+
+    def test_empty_tools_are_ignored(self):
+        resp, _ = self.chat(tools=[])
+        self.assertEqual(resp.status, 200)
+
+
+class TestEmbeddings(ServerTestBase):
+    def setUp(self):
+        super().setUp()
+        self.ollama_models = [{"id": "ollama:embed-model", "name": "embed-model", "engine": "Ollama (llama.cpp)",
+                               "backend": "ollama"}]
+        self.embed_calls = []
+
+        def fake_embed(model, inputs, **kw):
+            self.embed_calls.append((model, inputs))
+            if getattr(self, "embed_error", None):
+                raise self.embed_error
+            return [[float(i), 0.5, -1.25] for i, _ in enumerate(inputs)], 7
+
+        patcher = patch("prism.server.embed_ollama", side_effect=fake_embed)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def embed(self, **body):
+        return self.request("POST", "/v1/embeddings", {"model": "ollama:embed-model", **body})
+
+    def test_openai_shape_for_one_string_and_for_a_list(self):
+        resp, data = self.embed(input="hello")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual((data["object"], data["model"]), ("list", "ollama:embed-model"))
+        self.assertEqual(data["data"], [{"object": "embedding", "index": 0, "embedding": [0.0, 0.5, -1.25]}])
+        self.assertEqual(data["usage"], {"prompt_tokens": 7, "total_tokens": 7})
+        _, data = self.embed(input=["a", "b"])
+        self.assertEqual([d["index"] for d in data["data"]], [0, 1])
+        self.assertEqual(self.embed_calls[-1], ("ollama:embed-model", ["a", "b"]))
+
+    def test_unprefixed_installed_names_route_to_ollama(self):
+        resp, _ = self.request("POST", "/v1/embeddings", {"model": "embed-model", "input": "x"})
+        self.assertEqual(resp.status, 200)
+
+    def test_base64_is_little_endian_float32(self):  # the official Python client asks for this by default
+        import base64, struct
+        _, data = self.embed(input="hello", encoding_format="base64")
+        raw = base64.b64decode(data["data"][0]["embedding"])
+        self.assertEqual(struct.unpack("<3f", raw), (0.0, 0.5, -1.25))
+
+    def test_onnx_models_cannot_embed(self):
+        resp, data = self.request("POST", "/v1/embeddings", {"model": "qwen-coder-gpu", "input": "x"})
+        self.assertEqual((resp.status, data["error"]["code"]), (400, "embeddings_not_supported"))
+        self.assertEqual(self.embed_calls, [])
+
+    def test_bad_requests_are_400(self):
+        for body in ({"input": ""}, {"input": []}, {"input": [1, 2]}, {"input": ["a", ""]}, {"input": 5},
+                     {"input": ["x"] * 257}, {"input": "x", "encoding_format": "hex"}, {}):
+            resp, _ = self.embed(**body)
+            self.assertEqual(resp.status, 400, body)
+        resp, data = self.embed(input="x", dimensions=256)
+        self.assertEqual((resp.status, data["error"]["code"]), (400, "dimensions_not_supported"))
+        resp, data = self.request("POST", "/v1/embeddings", {"input": "x"})  # no model
+        self.assertEqual(resp.status, 400)
+        resp, data = self.request("POST", "/v1/embeddings", {"model": "nope", "input": "x"})
+        self.assertEqual((resp.status, data["error"]["code"]), (404, "model_not_found"))
+
+    def test_a_model_that_is_not_an_embedding_model_gets_the_daemons_reason(self):
+        import io
+        import urllib.error
+        body = io.BytesIO(b'{"error":"This server does not support embeddings."}')
+        self.embed_error = urllib.error.HTTPError("http://x", 501, "Not Implemented", {}, body)
+        resp, data = self.embed(input="x")
+        self.assertEqual((resp.status, data["error"]["code"]), (400, "embeddings_not_supported"))
+        self.assertIn("This server does not support embeddings.", data["error"]["message"])
+        self.assertIn("nomic-embed-text", data["error"]["message"])
+
+    def test_daemon_down_is_502_and_unknown_model_is_404(self):
+        import urllib.error
+        self.embed_error = urllib.error.URLError("connection refused")
+        resp, data = self.embed(input="x")
+        self.assertEqual((resp.status, data["error"]["code"]), (502, "backend_unavailable"))
+        self.embed_error = urllib.error.HTTPError("http://x", 404, "Not Found", {}, None)
+        resp, data = self.embed(input="x")
+        self.assertEqual((resp.status, data["error"]["code"]), (404, "model_not_found"))
+        self.embed_error = ValueError("Ollama returned no embeddings for this model")
+        resp, _ = self.embed(input="x")
+        self.assertEqual(resp.status, 502)
 
 
 class TestClientDisconnect(ServerTestBase):

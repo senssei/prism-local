@@ -7,6 +7,9 @@ versions may include breaking changes).
 ## [Unreleased]
 
 ### Added
+- `prism convert MODEL`: converts and quantizes a Hugging Face model (or a local folder) to an ONNX Runtime GenAI folder with onnxruntime-genai's own model builder
+  (CUDA or CPU, `int4` or `fp16`) and installs it next to pulled models. Optional `convert` extra; it runs as a subprocess, is verified like a pull, is built in a
+  staging folder, and only replaces an existing model with `--force`. `prism doctor` reports whether its requirements are installed.
 - `stream_options.include_usage` on streaming requests: a last chunk with empty `choices`, `usage` and the `telemetry` block (device, timings). Streaming
   responses carried neither before, so clients had to estimate token counts.
 - `PRISM_PREFILL_CHUNK` (a positive integer of tokens): process the prompt in chunks. ONNX Runtime GenAI's GPU memory otherwise grows by
@@ -19,6 +22,33 @@ versions may include breaking changes).
   `400 context_length_exceeded` instead of a failure inside the engine.
 - Ollama responses carry `usage` and the real `finish_reason` (`length` when it hit `max_tokens`), and honour `stream_options.include_usage`.
 - `$OLLAMA_HOST` selects the Ollama daemon.
+
+- `prism pull owner/repo` downloads one model folder from a repo that keeps several side by side (Microsoft's `cuda/…`, `cpu_and_mobile/…`, `directml/…`), chosen by
+  `--ep` and `--quant`, or by the new `--variant TEXT`. Before, such a repo was downloaded whole (every variant) and then rejected for lacking a root `genai_config.json`.
+  Leftover `.azDownload*` files are skipped.
+- Aliases `phi-4-mini-reasoning`, `phi-4-reasoning`, `phi-3-mini-4k` and `mistral-7b-instruct-v0.2`; `scripts/verify_aliases.py` now also requires an `.onnx` file and a tokenizer.
+- Chat templates for Gemma and Mistral (v0.1/v0.2 and v0.3+), checked against the real Jinja templates of Gemma 2 and 3 and of Mistral v0.2 (Microsoft's ONNX export) and v0.3.
+
+- `prism serve --queue-timeout SEC` / `$PRISM_QUEUE_TIMEOUT` (default 300, `0` = no limit): a request that cannot get the model in time is answered `503 server_busy` with
+  `Retry-After` instead of hanging behind a slow generation.
+
+- Optional `jinja` extra (`pip install "prism-local[jinja]"`): Prism renders the model's own chat template in Jinja's immutable sandbox instead of only recognising its family,
+  which reproduces details like Qwen2.5's default system prompt. A leading BOS is dropped when the tokenizer adds it. A template that fails falls back to the built-in
+  format with a warning. `$PRISM_TEMPLATE=auto|jinja|builtin`. Without jinja2 nothing changes.
+
+- Tool calling on `/v1/chat/completions`: `tools`, `tool_choice: "none"`, `role: "tool"` messages and assistant `tool_calls`; replies carry OpenAI-shaped `tool_calls` and
+  `finish_reason: "tool_calls"`, streaming or not. ONNX models need the `jinja` extra and a chat template that takes `tools` (otherwise `400 tools_not_supported`); their
+  calls are recognised in the output in the Qwen/Hermes, Phi-4-mini, Mistral and Llama 3.1 conventions, and streaming with `tools` is buffered. Ollama models pass `tools` to the daemon.
+  Checked end to end on Qwen3-0.6B (ONNX, CPU) and Llama 3.1 8B (Ollama).
+
+- `POST /v1/embeddings` (float and base64), served by Ollama; ONNX models answer `400 embeddings_not_supported`.
+
+### Fixed
+- ONNX Runtime GenAI decodes special tokens to empty text, which removed the `<tool_call>`, `<|tool_call|>`, `[TOOL_CALLS]` and `<|python_tag|>` markers from the output. The engine now
+  restores those (and only those) for models whose tokenizer drops them.
+- `finish_reason` is `stop`, not `length`, when the model ends with an end-of-sequence token exactly at `max_tokens` (the EOS ids come from `genai_config.json`).
+- The model scan no longer walks into the subfolders of a model folder.
+- `prism mcp`, with no server running, loads the model once and keeps it for later tool calls (released after 2 idle minutes) instead of reloading it on every call.
 
 ### Changed
 - The chat template is taken from the model's own `chat_template` (`chat_template.jinja`, `chat_template.json` or `tokenizer_config.json`) when it has one Prism

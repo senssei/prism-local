@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple
 
 from prism.telemetry import bootstrap_cuda_env, get_gpu_info
 from prism.templates import format_prompt  # noqa: F401  (re-exported for callers)
+from prism.tools import TOOL_MARKERS
 
 logger = logging.getLogger("prism.engine")
 
@@ -59,6 +60,28 @@ def prefill_chunk_tokens() -> Optional[int]:
     return value
 
 
+def read_eos_token_ids(model_path: str) -> frozenset:
+    """End-of-sequence token ids from the model's genai_config.json (`model.eos_token_id`: an int or a list); empty when unknown."""
+    try:
+        with open(os.path.join(model_path, "genai_config.json"), encoding="utf-8") as f:
+            value = json.load(f).get("model", {}).get("eos_token_id")
+    except (OSError, ValueError, AttributeError):
+        return frozenset()
+    values = value if isinstance(value, list) else [value]
+    return frozenset(v for v in values if isinstance(v, int) and not isinstance(v, bool))
+
+
+def read_tool_marker_tokens(model_path: str) -> Dict[int, str]:
+    """{token id: text} for the tool-call marker tokens (`<tool_call>`, `[TOOL_CALLS]`, ...) that the model's tokenizer.json defines."""
+    try:
+        with open(os.path.join(model_path, "tokenizer.json"), encoding="utf-8") as f:
+            added = json.load(f).get("added_tokens") or []
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {t["id"]: t["content"] for t in added
+            if isinstance(t, dict) and t.get("content") in TOOL_MARKERS and isinstance(t.get("id"), int)}
+
+
 class Engine(Protocol):
     """What the server, chat and MCP layers need from an inference engine."""
 
@@ -96,6 +119,9 @@ class OnnxGenAiEngine:
         # onnxruntime_genai cannot choose and the model's own genai_config decides.
         self.device = "default"
         self.fallback_reason: Optional[str] = None
+        self._eos_ids = read_eos_token_ids(self.model_path)
+        # Marker tokens the tokenizer decodes to nothing; without them a tool call cannot be told from prose. See _find_stripped_markers.
+        self._literal_tokens: Dict[int, str] = {}
         self._model = None
         self._tokenizer = None
         # "stop" (EOS) or "length" (hit max_tokens) for the most recent completed generation.
@@ -141,9 +167,22 @@ class OnnxGenAiEngine:
                 if self._model is None:
                     self._model, self.device = self._model_for("cpu"), "cpu"
             self._tokenizer = og.Tokenizer(self._model)
+            self._literal_tokens = self._find_stripped_markers()
         except Exception as ex:
             self._model = self._tokenizer = None
             raise ModelLoadError(f"Failed to load ONNX model at {self.model_path}: {ex}")
+
+    def _find_stripped_markers(self) -> Dict[int, str]:
+        """Of the tool-call marker tokens, those that ONNX Runtime GenAI's streaming decoder turns into empty text (it drops special
+        tokens, and Qwen, Phi-4-mini, Mistral and Llama 3.1 mark tool calls with them). Their literal text is put back into the output."""
+        stripped = {}
+        for token_id, content in read_tool_marker_tokens(self.model_path).items():
+            try:
+                if self._tokenizer.create_stream().decode(token_id) == "":
+                    stripped[token_id] = content
+            except Exception:  # a token this tokenizer does not know
+                continue
+        return stripped
 
     def count_tokens(self, text: str) -> int:
         """Returns the number of tokens `text` encodes to."""
@@ -221,6 +260,7 @@ class OnnxGenAiEngine:
         self.last_finish_reason = "stop"
         first = True
         count = 0
+        last_token = None
         t_start = time.perf_counter()
 
         try:
@@ -228,13 +268,17 @@ class OnnxGenAiEngine:
                 generator.generate_next_token()
                 next_tokens = generator.get_next_tokens()
                 if next_tokens:
+                    last_token = int(next_tokens[0])
                     text = tokenizer_stream.decode(next_tokens[0])
+                    if not text and last_token in self._literal_tokens:
+                        text = self._literal_tokens[last_token]
                     count += 1
                     elapsed = max(time.perf_counter() - t_start, 1e-6)
                     speed = count / elapsed
                     yield text, first, speed
                     first = False
-            if count >= max_tokens:
+            # The library reports "done" for both an EOS token and the length cap. Ending on EOS exactly at the cap is still a stop.
+            if count >= max_tokens and last_token not in self._eos_ids:
                 self.last_finish_reason = "length"
         finally:
             del generator

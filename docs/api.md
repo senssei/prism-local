@@ -38,6 +38,7 @@ curl -s http://127.0.0.1:5272/v1/chat/completions -H 'Content-Type: application/
 |---|---|
 | `GET /v1/models` | ONNX and Ollama models. Extra fields: `size_mb`, `owned_by` (engine), `device` (where the model will run: `CPU` or `CUDA (GPU)`, following `--device` and the hardware), and for ONNX models `exported_for` (what the model files were built for; a `generic-cpu` variant still runs on CUDA under `--device auto`). |
 | `POST /v1/chat/completions` | Chat completion, streaming or not |
+| `POST /v1/embeddings` | Embeddings, **Ollama models only** (see [Embeddings](#embeddings)) |
 | `POST /v1/completions` | Legacy text completion. ONNX models get the raw prompt (no chat template). Ollama models get it as one user message. |
 | `GET /health` (also `/v1/health`, `/v1/status`) | Status, `active_model`, `active_device` (`cuda`/`cpu`/`null` when nothing is loaded) and GPU telemetry. **No auth required.** |
 
@@ -53,10 +54,12 @@ Trailing slashes are accepted.
 | `stream_options.include_usage` | With `stream`, add a last chunk that carries `usage` (and, for ONNX models, `telemetry`); see Responses. Ollama models only when the daemon reports counts |
 | `stop` | A string or a list of up to 4 strings. Generation ends at the first match, which is not included in the text; `finish_reason` is `stop` |
 | `max_tokens` / `max_completion_tokens` | Default 512, must be ≥ 1. For ONNX models whose `genai_config.json` states a `context_length`, it is capped to the room left after the prompt (`finish_reason` is then `length`); a prompt that fills the window is a `400` `context_length_exceeded` |
+| `tools` | OpenAI function tools (`[{"type": "function", "function": {"name", "description", "parameters"}}]`); see [Tool calling](#tool-calling) |
+| `tool_choice` | `"none"` hides the tools for this request. Any other value is treated as `"auto"`: Prism cannot force a call |
 | `temperature` | Default 0.1; `0` means greedy decoding |
 | `top_p` | Default 0.9 |
 
-Message `content` may be a string or a list of parts; text parts are used and others (images, …) are dropped. Other OpenAI fields (`n`, `tools`, `response_format`, …) are **accepted and ignored**.
+Message `content` may be a string or a list of parts; text parts are used and others (images, …) are dropped. Other OpenAI fields (`n`, `response_format`, …) are **accepted and ignored**.
 
 ## Responses
 
@@ -73,6 +76,42 @@ comes after the `finish_reason` chunk and before `[DONE]`, carrying `usage` (`pr
 tokenizer) and the same `telemetry` block as non-streaming responses; without the option the stream is unchanged. If generation fails after streaming has begun, an event
 `data: {"error": {...}}` is sent before `[DONE]`. If the client disconnects, generation stops.
 
+## Tool calling
+
+Send `tools` as you would to OpenAI. When the model calls one, the reply carries `message.tool_calls` (`id`, `type: "function"`, `function.name`, and
+`function.arguments` as a JSON **string**), `content` holds any text that came before the call (or is `null`), and `finish_reason` is `tool_calls`.
+Send the result back as a `{"role": "tool", "tool_call_id": ..., "content": ...}` message after the assistant message that made the call.
+
+- **ONNX models** need the model's own chat template to take tools, and Prism renders that template only with the optional
+  `jinja` extra (`pip install "prism-local[jinja]"`, see [Models](models.md#rendering-the-template-itself-optional)). Without both, a request with `tools` gets
+  `400 tools_not_supported` instead of a silent non-answer. The model writes its calls as text in its own convention (`<tool_call>…`, `<|tool_call|>…`,
+  `[TOOL_CALLS]…`, `<|python_tag|>…`, or a bare JSON object); Prism recognises them in the output. Those markers are special tokens that ONNX Runtime GenAI decodes
+  to nothing, so the engine puts them back.
+- **Streaming** with `tools` on an ONNX model is **buffered**: the calls can only be recognised in the finished text, so the reply arrives at the end, as a content
+  chunk and/or one `tool_calls` delta, then the `finish_reason` chunk. Without `tools` streaming is token by token as before.
+- **Ollama models** get `tools` passed to the daemon, which parses the calls itself (use a model that supports tools, such as `llama3.1` or `qwen2.5`).
+- Whether a call is *right* depends on the model; small models are unreliable. Prism guarantees the shape of the reply, not the choice of tool.
+
+## Embeddings
+
+`POST /v1/embeddings` follows OpenAI's shape and is served by Ollama, because ONNX Runtime GenAI does not produce embeddings. Use an Ollama embedding model:
+
+```bash
+prism pull ollama:nomic-embed-text
+curl -s http://127.0.0.1:5272/v1/embeddings -H 'Content-Type: application/json' \
+  -d '{"model": "ollama:nomic-embed-text", "input": ["first text", "second text"]}'
+```
+
+| Field | Notes |
+|---|---|
+| `model` | An Ollama model (`ollama:` prefix or an installed name). An ONNX model gets `400 embeddings_not_supported` |
+| `input` | A string, or a list of up to 256 non-empty strings. Token arrays are not supported |
+| `encoding_format` | `float` (default) or `base64` (little-endian float32; the official OpenAI Python client asks for it) |
+| `dimensions` | Not supported (`400 dimensions_not_supported`) |
+
+The reply is `{"object": "list", "data": [{"object": "embedding", "index", "embedding"}], "model", "usage": {"prompt_tokens", "total_tokens"}}`. A missing or
+unreachable daemon is `502 backend_unavailable`; a model Ollama does not have is `404 model_not_found`.
+
 ## Errors
 
 All errors are JSON: `{"error": {"message", "type", "param", "code"}}`.
@@ -80,18 +119,21 @@ All errors are JSON: `{"error": {"message", "type", "param", "code"}}`.
 | Status | `code` | Meaning |
 |---|---|---|
 | 400 | *(none)* | Invalid JSON, missing/invalid `messages`, `model`, or a numeric field |
+| 400 | `embeddings_not_supported` / `dimensions_not_supported` | `/v1/embeddings` with an ONNX model / with `dimensions` |
+| 400 | `tools_not_supported` | `tools` sent to an ONNX model whose chat template cannot take them, or without jinja2 installed |
 | 400 | `ambiguous_model` | The name matches several models; the message lists them |
 | 400 | `context_length_exceeded` | The prompt fills the model's context window (ONNX models with a known `context_length`) |
 | 401 | `invalid_api_key` | Missing or wrong bearer token |
 | 403 | `host_not_allowed` | Non-loopback `Host` header on a loopback bind |
 | 404 | `model_not_found` / `not_found` | Unknown model / unknown route |
 | 413 | `body_too_large` | Body over 10 MB |
+| 503 | `server_busy` | The model stayed busy with other requests longer than `--queue-timeout`; carries `Retry-After: 30` |
 | 500 | `model_load_failed` | The ONNX model could not be loaded, for example `--device cuda` with a broken CUDA setup |
 | 502 | `backend_unavailable` | Ollama is unreachable or failed |
 
 ## Concurrency
 
-One ONNX model is resident at a time, and generation is **serialized behind a lock**: concurrent requests queue. Requesting a
+One ONNX model is resident at a time, and generation is **serialized behind a lock**: concurrent requests queue, for at most `--queue-timeout` seconds (default 300), after which they get `503`. Requesting a
 different ONNX model unloads the current one and loads the new one, which takes seconds. Ollama requests are not serialized by
 Prism.
 

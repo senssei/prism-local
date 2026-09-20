@@ -22,6 +22,13 @@ prism serve --host 0.0.0.0 --api-key "$(openssl rand -hex 16)"
 Prism prints a warning if you bind a non-loopback address without a key. It does not provide TLS: put a reverse proxy in
 front of it if the traffic leaves a trusted network.
 
+## Chat templates
+
+A model's `chat_template` is Jinja, that is, code shipped in the model folder. With the optional `jinja` extra Prism renders it inside
+`jinja2.sandbox.ImmutableSandboxedEnvironment`, which forbids the attribute access templates need to escape (`__class__`, `__mro__`, …) and cannot modify its
+inputs. A template that fails, or is blocked, is logged and replaced by Prism's built-in format. Only pull models from sources you trust
+all the same; `PRISM_TEMPLATE=builtin` turns rendering off.
+
 !!! warning "About `/health`"
     `/health` is unauthenticated so it can be used for liveness checks. It returns the GPU model, memory usage and the active
     model name.

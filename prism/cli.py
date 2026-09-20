@@ -12,10 +12,12 @@ from prism import PRISM_BANNER
 from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from prism.chat import run_interactive_chat
 from prism.benchmark import run_benchmark
-from prism.server import start_server
+from prism.server import default_queue_timeout, start_server
 from prism.telemetry import get_gpu_info, bootstrap_cuda_env, probe_cuda_provider
-from prism.engine import ModelLoadError, OnnxGenAiEngine, format_prompt, OG_AVAILABLE
+from prism.engine import ModelLoadError, OnnxGenAiEngine, OG_AVAILABLE
+from prism.templates import render_prompt
 from prism.ollama_bridge import is_ollama_running, stream_ollama_chat
+from prism.convert import missing_dependencies, convert_model
 from prism.connectors import connect_cursor, connect_cline, connect_mcp
 
 
@@ -69,6 +71,12 @@ def cmd_doctor(args):
         print("✅ Ollama Service: Reachable at http://localhost:11434")
     else:
         print("ℹ️ Ollama Service: Offline (optional for GGUF models)")
+
+    missing = missing_dependencies()
+    if not missing:
+        print("✅ Model builder: All requirements installed (prism convert).")
+    else:
+        print(f'ℹ️ Model builder: Missing {", ".join(missing)} (optional, for prism convert: pip install "prism-local[convert]")')
     print("=" * 65)
 
 
@@ -94,11 +102,29 @@ def cmd_pull(args):
         ep=args.ep,
         quant=args.quant,
         backend=args.backend,
+        variant=args.variant,
     )
     if res:
         print("✅ Model pull completed.")
     else:
         print("❌ Model pull failed or aborted.")
+
+
+def cmd_convert(args):
+    res = convert_model(
+        args.model,
+        output_dir=args.output_dir,
+        ep=args.ep,
+        quant=args.quant,
+        name=args.name,
+        force=args.force,
+        trust_remote_code=args.trust_remote_code,
+    )
+    if res:
+        print("✅ Model conversion completed.")
+    else:
+        print("❌ Model conversion failed or aborted.")
+        sys.exit(1)
 
 
 def cmd_run(args):
@@ -125,7 +151,7 @@ def cmd_run(args):
     else:
         engine = OnnxGenAiEngine(resolved["path"])
         print(f"[device: {engine.device}]", file=sys.stderr)
-        formatted = format_prompt([{"role": "user", "content": prompt}], resolved.get("template"))
+        formatted = render_prompt(resolved, [{"role": "user", "content": prompt}])
         try:
             for token, _, _ in engine.stream_generate(formatted, max_tokens=args.max_tokens):
                 print(token, end="", flush=True)
@@ -144,6 +170,7 @@ def cmd_serve(args):
         host=args.host,
         api_key=args.api_key or os.environ.get("PRISM_API_KEY") or None,
         cors_origins=args.cors_origin,
+        queue_timeout=args.queue_timeout if args.queue_timeout is not None else default_queue_timeout(),
     )
 
 
@@ -218,11 +245,24 @@ def main():
     p_pull.add_argument("--output-dir", default=None, help="Destination folder (default: first $PRISM_MODEL_DIRS entry, else ~/.prism/models)")
     p_pull.add_argument("--ep", choices=["cuda", "cpu"], default=None, help="Target execution provider (default: auto-detect)")
     p_pull.add_argument("--quant", choices=["int4", "fp16"], default="int4", help="Quantization level (default: int4)")
+    p_pull.add_argument("--variant", default=None, metavar="TEXT",
+                        help="For a repo with several model folders: pick the one whose path contains TEXT (default: chosen by --ep and --quant)")
     p_pull.add_argument("--backend", choices=["auto", "onnx", "ollama"], default="auto", help="Inference backend (default: auto)")
     p_pull.set_defaults(func=cmd_pull)
 
+    # convert
+    p_conv = subparsers.add_parser("convert", help="Convert and quantize a Hugging Face model to ONNX GenAI (model builder)")
+    p_conv.add_argument("model", help="Hugging Face repo ID (e.g. Qwen/Qwen2.5-0.5B-Instruct) or a local model folder")
+    p_conv.add_argument("--ep", choices=["cuda", "cpu"], default=None, help="Target execution provider (default: auto-detect)")
+    p_conv.add_argument("--quant", choices=["int4", "fp16"], default="int4", help="Precision (default: int4; fp16 needs --ep cuda)")
+    p_conv.add_argument("--output-dir", default=None, help="Destination folder (default: first $PRISM_MODEL_DIRS entry, else ~/.prism/models)")
+    p_conv.add_argument("--name", default=None, help="Installed folder name (default: <model>-<ep>-<quant>)")
+    p_conv.add_argument("--force", action="store_true", help="Replace the folder if it already exists")
+    p_conv.add_argument("--trust-remote-code", action="store_true", help="Let Hugging Face run the model's own code while loading it")
+    p_conv.set_defaults(func=cmd_convert)
+
     # run
-    p_run = subparsers.add_parser("run", parents=[device_parent], help="Run model completion or streaming generation")
+    p_run =subparsers.add_parser("run", parents=[device_parent], help="Run model completion or streaming generation")
     p_run.add_argument("model", help="Model name or alias")
     p_run.add_argument("prompt", nargs="?", default=None, help="Prompt text (optional, defaults to chat)")
     p_run.add_argument("--max-tokens", type=int, default=512, help="Max generation tokens")
@@ -239,6 +279,8 @@ def main():
     p_serve.add_argument("--host", default="127.0.0.1", help="Host interface (default: 127.0.0.1; use 0.0.0.0 to expose on the network, ideally with --api-key)")
     p_serve.add_argument("--api-key", default=None, help="Require 'Authorization: Bearer <key>' (default: $PRISM_API_KEY)")
     p_serve.add_argument("--cors-origin", action="append", default=[], metavar="ORIGIN", help="Allow a browser origin (repeatable, or '*'); CORS is off by default")
+    p_serve.add_argument("--queue-timeout", type=float, default=None, metavar="SEC",
+                         help="Seconds a request may wait for the model before it gets 503 (0: wait forever; default: $PRISM_QUEUE_TIMEOUT, else 300)")
     p_serve.set_defaults(func=cmd_serve)
 
     # benchmark

@@ -5,9 +5,11 @@ Exposes Prism's multi-engine inference (ONNX Runtime GenAI on CUDA & Ollama GGUF
 code generation, code review, model listing, and GPU telemetry to AI agents.
 """
 
+import atexit
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -17,6 +19,45 @@ from prism.catalog import ModelCatalog
 from prism.telemetry import get_gpu_info
 
 PRISM_DEFAULT_URL = os.environ.get("PRISM_BASE_URL", "http://localhost:5272/v1")
+
+# With no server to talk to, tool calls run the model inside this process. It stays loaded between calls (loading takes seconds),
+# and is released after this much idle time so it does not hold VRAM against a `prism serve` started later.
+IDLE_UNLOAD_SEC = 120.0
+
+_catalog_instance: Optional[ModelCatalog] = None
+_manager = None
+_idle_timer: Optional[threading.Timer] = None
+_state_lock = threading.Lock()
+
+
+def _catalog() -> ModelCatalog:
+    """One catalog per process, so its 5-second discovery cache works across tool calls."""
+    global _catalog_instance
+    with _state_lock:
+        if _catalog_instance is None:
+            _catalog_instance = ModelCatalog()
+        return _catalog_instance
+
+
+def _engine_manager():
+    """The in-process engine manager (imported lazily: importing the engine loads the CUDA libraries)."""
+    global _manager
+    with _state_lock:
+        if _manager is None:
+            from prism.server import ActiveEngineManager
+            _manager = ActiveEngineManager(catalog=_catalog())
+            atexit.register(_manager.unload)
+        return _manager
+
+
+def _schedule_idle_unload() -> None:
+    global _idle_timer
+    with _state_lock:
+        if _idle_timer is not None:
+            _idle_timer.cancel()
+        _idle_timer = threading.Timer(IDLE_UNLOAD_SEC, _manager.unload)
+        _idle_timer.daemon = True
+        _idle_timer.start()
 
 
 def _auth_headers(headers: Dict[str, str]) -> Dict[str, str]:
@@ -34,7 +75,7 @@ def call_prism_server(
     base_url: str = PRISM_DEFAULT_URL,
 ) -> str:
     """Sends a chat completion request to the Prism OpenAI-compatible server."""
-    catalog = ModelCatalog()
+    catalog = _catalog()
     all_models = catalog.list_all_models(include_ollama=True)
 
     if not model:
@@ -93,19 +134,17 @@ def call_prism_server(
             return f"Error: {ex}"
         if resolved and resolved.get("backend") == "onnx":
             try:
-                from prism.engine import OnnxGenAiEngine, format_prompt
-                engine = OnnxGenAiEngine(resolved["path"])
-                try:
-                    formatted = format_prompt(messages, resolved.get("template"))
+                from prism.templates import render_prompt
+                formatted = render_prompt(resolved, messages)
+                manager = _engine_manager()
+                with manager.use_engine(resolved) as engine:
                     gen_res = engine.generate(formatted, max_tokens=opts.get("max_tokens", 1024))
-                    elapsed = time.perf_counter() - t0
-                    telemetry = (
-                        f"\n\n[💎 Prism (Direct CUDA Engine): {model} @ {gen_res['decode_tok_per_sec']:.1f} tok/s | "
-                        f"TTFT: {gen_res['ttft_sec']*1000:.1f}ms | Zero Cloud Cost]"
-                    )
-                    return f"{gen_res['text']}{telemetry}"
-                finally:
-                    engine.unload()
+                _schedule_idle_unload()
+                telemetry = (
+                    f"\n\n[💎 Prism (Direct CUDA Engine): {model} @ {gen_res['decode_tok_per_sec']:.1f} tok/s | "
+                    f"TTFT: {gen_res['ttft_sec']*1000:.1f}ms | Zero Cloud Cost]"
+                )
+                return f"{gen_res['text']}{telemetry}"
             except Exception as engine_ex:
                 return f"Error executing direct ONNX engine for model '{model}': {engine_ex}"
 
@@ -207,7 +246,7 @@ def handle_list_tools() -> List[Dict[str, Any]]:
 
 def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
     """Dispatches MCP tool call requests."""
-    catalog = ModelCatalog()
+    catalog = _catalog()
 
     if name == "prism_ask_coder":
         task = args.get("task", "")
