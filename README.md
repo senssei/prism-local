@@ -16,7 +16,7 @@ Prism puts **ONNX Runtime GenAI** (CUDA or CPU) and **Ollama / llama.cpp** (GGUF
 
 📖 **Documentation:** <https://senssei.github.io/prism-local/>
 
-> **Status: alpha (v0.1.0).** It works, it is tested (~115 tests, no GPU needed), and its defaults are safe
+> **Status: alpha (v0.1.0).** It works, it is tested (~180 tests, no GPU needed), and its defaults are safe
 > (loopback-only, no CORS). APIs and flags may still change. See [Known limitations](#known-limitations).
 
 ## Why
@@ -79,6 +79,7 @@ curl -s http://127.0.0.1:5272/v1/chat/completions -H 'Content-Type: application/
 | `PRISM_MODEL_DIRS` | `:`-separated model directories; the first is where `pull` writes | `~/.prism/models` |
 | `PRISM_DEVICE` | `auto`, `cuda` or `cpu` | `auto` |
 | `PRISM_API_KEY` | Bearer token for `serve`; also used by the MCP client | unset (no auth) |
+| `OLLAMA_HOST` | Ollama daemon address | `http://localhost:11434` |
 | `PRISM_BASE_URL` | Server URL used by `prism mcp` | `http://localhost:5272/v1` |
 | `PRISM_PYTHON` | Interpreter used by `bin/prism` | see above |
 
@@ -124,7 +125,7 @@ it really used, and `prism doctor` shows a CUDA library mismatch.
   missing library.
 - One ONNX model is resident at a time and requests are serialized (a lock), so this is a single-user local server, not a
   high-concurrency one.
-- No stop sequences, embeddings, or tool calling on `/v1/chat/completions` yet.
+- No embeddings or tool calling on `/v1/chat/completions` yet.
 - Chat templates are detected from the model name and `genai_config.json` (Phi, Qwen/ChatML, Llama 3, DeepSeek); unknown
   families fall back to ChatML and may need a template added.
 - Linux and WSL2 only.
@@ -133,7 +134,7 @@ it really used, and `prism doctor` shows a CUDA library mismatch.
 
 ```bash
 pip install -e ".[dev]"
-PYTHONPATH=. python3 -m unittest discover -s tests -v    # ~115 tests, ~6 s, no GPU/network/models needed
+PYTHONPATH=. python3 -m unittest discover -s tests -v    # ~180 tests, ~15 s, no GPU/network/models needed
 pip install -e ".[docs]" && mkdocs serve                  # docs site at http://127.0.0.1:8000
 ```
 

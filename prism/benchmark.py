@@ -10,7 +10,7 @@ from prism.telemetry import get_gpu_info
 
 
 def _vram_used() -> float:
-    devices = get_gpu_info().get("devices")
+    devices = get_gpu_info(max_age=0).get("devices")
     return devices[0]["vram_used_mb"] if devices else 0.0
 
 

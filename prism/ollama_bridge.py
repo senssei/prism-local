@@ -4,14 +4,32 @@ Enables prism to discover, run, and serve Ollama models alongside ONNX models.
 """
 
 import json
+import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, Iterator, List, Optional
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 
-def is_ollama_running(base_url: str = OLLAMA_BASE_URL) -> bool:
+
+def ollama_base_url() -> str:
+    """The Ollama daemon URL: $OLLAMA_HOST (Ollama's own variable; `host`, `host:port` or a full URL), else localhost:11434."""
+    raw = os.environ.get("OLLAMA_HOST", "").strip()
+    if not raw:
+        return OLLAMA_BASE_URL
+    if "://" in raw:  # a full URL: like Ollama itself, a missing port means the scheme's default
+        return raw.rstrip("/")
+    parts = urllib.parse.urlsplit(f"//{raw}")
+    if parts.port is None and parts.hostname:
+        host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+        return f"http://{host}:11434"
+    return f"http://{raw}"
+
+
+def is_ollama_running(base_url: Optional[str] = None) -> bool:
     """Checks whether the local Ollama daemon is reachable."""
+    base_url = base_url or ollama_base_url()
     try:
         req = urllib.request.Request(f"{base_url}/api/version", method="GET")
         with urllib.request.urlopen(req, timeout=1.5) as resp:
@@ -19,8 +37,9 @@ def is_ollama_running(base_url: str = OLLAMA_BASE_URL) -> bool:
     except Exception:
         return False
 
-def list_ollama_models(base_url: str = OLLAMA_BASE_URL) -> List[Dict[str, Any]]:
+def list_ollama_models(base_url: Optional[str] = None) -> List[Dict[str, Any]]:
     """Retrieves list of installed Ollama models (empty if the daemon is unreachable)."""
+    base_url = base_url or ollama_base_url()
     try:
         req = urllib.request.Request(f"{base_url}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=2.0) as resp:
@@ -48,9 +67,15 @@ def stream_ollama_chat(
     model: str,
     messages: List[Dict[str, str]],
     options: Optional[Dict[str, Any]] = None,
-    base_url: str = OLLAMA_BASE_URL,
+    base_url: Optional[str] = None,
+    stats: Optional[Dict[str, Any]] = None,
 ) -> Iterator[str]:
-    """Streams chat completions from Ollama."""
+    """Streams chat completions from Ollama.
+
+    When `stats` is given it is filled from the final chunk once the stream ends: `prompt_tokens`, `completion_tokens`
+    and `finish_reason` ("stop" or "length"), whichever the daemon reported.
+    """
+    base_url = base_url or ollama_base_url()
     clean_model = model.replace("ollama:", "")
     payload = {
         "model": clean_model,
@@ -70,16 +95,22 @@ def stream_ollama_chat(
             if line:
                 try:
                     chunk = json.loads(line.decode("utf-8"))
-                    msg = chunk.get("message", {})
-                    content = msg.get("content", "")
-                    if content:
-                        yield content
                 except Exception:
                     continue
+                if stats is not None and chunk.get("done"):
+                    if "prompt_eval_count" in chunk:
+                        stats["prompt_tokens"] = chunk["prompt_eval_count"]
+                    if "eval_count" in chunk:
+                        stats["completion_tokens"] = chunk["eval_count"]
+                    stats["finish_reason"] = "length" if chunk.get("done_reason") == "length" else "stop"
+                content = (chunk.get("message") or {}).get("content", "")
+                if content:
+                    yield content
 
 
-def pull_ollama_model(model_name: str, base_url: str = OLLAMA_BASE_URL) -> bool:
+def pull_ollama_model(model_name: str, base_url: Optional[str] = None) -> bool:
     """Pulls an Ollama model using the streaming /api/pull endpoint with progress display."""
+    base_url = base_url or ollama_base_url()
     clean_model = model_name.replace("ollama:", "")
     if not is_ollama_running(base_url):
         print(f"❌ Cannot pull Ollama model '{clean_model}': Ollama daemon is not running at {base_url}.")

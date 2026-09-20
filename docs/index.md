@@ -42,7 +42,7 @@ findings shaped Prism.
 - **CUDA needs matching libraries and Python 3.11+.** The `cuda` extra installs a matched stack; if you bring your own,
   [`prism doctor`](devices.md#diagnosing-cuda-problems) tells you what is missing.
 - One ONNX model is resident at a time and requests are serialized, so this is a single-user local server.
-- No stop sequences, embeddings or tool calling on the chat endpoint yet.
+- No embeddings or tool calling on the chat endpoint yet.
 - Only three model aliases are curated (`phi-4-mini`, `phi-4`, `phi-3.5-mini`); any other ONNX GenAI repo can be pulled as
   `owner/repo`. See [Models](models.md).
 - Linux and WSL2 only.

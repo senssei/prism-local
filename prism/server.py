@@ -20,6 +20,7 @@ from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from prism.engine import Engine, OnnxGenAiEngine, format_prompt
 from prism.ollama_bridge import stream_ollama_chat
 from prism.telemetry import get_gpu_info
+from prism.templates import flatten_content
 
 logger = logging.getLogger("prism.server")
 
@@ -118,6 +119,82 @@ def _float_param(req: Dict[str, Any], key: str, default: float) -> float:
         return float(v)
     except (TypeError, ValueError):
         raise ApiError(400, f"'{key}' must be a number")
+
+
+MAX_STOP_SEQUENCES = 4  # OpenAI's limit
+
+
+def _stop_param(req: Dict[str, Any]) -> List[str]:
+    """`stop`: a string or a list of up to four non-empty strings."""
+    v = req.get("stop")
+    if v is None:
+        return []
+    stops = [v] if isinstance(v, str) else v
+    if (not isinstance(stops, list) or len(stops) > MAX_STOP_SEQUENCES
+            or not all(isinstance(x, str) and x for x in stops)):
+        raise ApiError(400, f"'stop' must be a non-empty string or a list of up to {MAX_STOP_SEQUENCES} non-empty strings")
+    return stops
+
+
+class StopMatcher:
+    """Cuts generated text at the first stop sequence.
+
+    Text that might still turn out to be the start of a stop sequence is held back until the next piece settles it, so a stop
+    split across tokens never leaks into the output. With no stop sequences it passes everything straight through.
+    """
+
+    def __init__(self, stops: Sequence[str]):
+        self.stops = list(stops)
+        self.held = ""
+        self.hit = False
+
+    def feed(self, piece: str) -> str:
+        """Returns the part of the text that is now safe to send."""
+        if self.hit:
+            return ""
+        self.held += piece
+        cuts = [i for i in (self.held.find(s) for s in self.stops) if i >= 0]
+        if cuts:
+            out, self.held, self.hit = self.held[:min(cuts)], "", True
+            return out
+        keep = 0
+        for s in self.stops:
+            for n in range(min(len(s) - 1, len(self.held)), keep, -1):
+                if self.held.endswith(s[:n]):
+                    keep = n
+                    break
+        out, self.held = self.held[:len(self.held) - keep], self.held[len(self.held) - keep:]
+        return out
+
+    def flush(self) -> str:
+        """The held-back tail, once generation ended without a stop sequence."""
+        out, self.held = self.held, ""
+        return out
+
+
+def _stopped_pieces(gen: Iterator[Any], stop: Sequence[str], stats: Dict[str, Any]) -> Iterator[str]:
+    """Text pieces of an engine stream with stop sequences applied. Fills `stats` (tokens, ttft, rate, stopped) as it goes;
+    when a stop sequence matches it ends early and leaves closing `gen` (which aborts generation) to the caller."""
+    matcher = StopMatcher(stop)
+    started = time.perf_counter()
+    for token_text, _, tok_per_sec in gen:
+        if stats["ttft"] is None:
+            stats["ttft"] = time.perf_counter() - started
+        stats["tokens"] += 1
+        stats["rate"] = tok_per_sec
+        out = matcher.feed(token_text)
+        if out:
+            yield out
+        if matcher.hit:
+            stats["stopped"] = True
+            return
+    tail = matcher.flush()
+    if tail:
+        yield tail
+
+
+def _new_stats() -> Dict[str, Any]:
+    return {"tokens": 0, "ttft": None, "rate": 0.0, "stopped": False}
 
 
 class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
@@ -294,6 +371,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             top_p=_float_param(req, "top_p", 0.9),
             chat=True,
             include_usage=_include_usage(req),
+            stop=_stop_param(req),
         )
 
     def _handle_completions(self):
@@ -316,10 +394,11 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             chat=False,
             raw_prompt=prompt,
             include_usage=_include_usage(req),
+            stop=_stop_param(req),
         )
 
     def _generate(self, resolved, model_id, messages, stream, max_tokens, temperature, top_p, chat, raw_prompt=None,
-                  include_usage=False):
+                  include_usage=False, stop=()):
         obj = "chat.completion" if chat else "text_completion"
         cmpl_id = f"{'chatcmpl' if chat else 'cmpl'}-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
@@ -352,8 +431,21 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 body["telemetry"] = telemetry
             return body
 
+        def usage_chunk(prompt_tokens: int, completion_tokens: int,
+                        telemetry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            # OpenAI's stream_options.include_usage: one last chunk with no choices, carrying the token counts. The
+            # `telemetry` block (device, timings) is the same one non-streaming responses carry.
+            body: Dict[str, Any] = {
+                "id": cmpl_id, "object": f"{obj}.chunk" if chat else obj, "created": created, "model": model_id,
+                "choices": [], "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                                         "total_tokens": prompt_tokens + completion_tokens}}
+            if telemetry:
+                body["telemetry"] = telemetry
+            return body
+
         if resolved.get("backend") == "ollama":
-            self._generate_ollama(resolved, messages, stream, max_tokens, temperature, top_p, chunk, final)
+            self._generate_ollama(resolved, messages, stream, max_tokens, temperature, top_p, stop, include_usage,
+                                  chunk, final, usage_chunk)
             return
 
         prompt = raw_prompt if raw_prompt is not None else format_prompt(messages, resolved.get("template"))
@@ -366,7 +458,13 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
 
         with stack:
             prompt_tokens = engine.count_tokens(prompt)
-            if not stream:
+            window = resolved.get("context_length")
+            if window:
+                if prompt_tokens >= window:
+                    raise ApiError(400, f"The prompt is {prompt_tokens} tokens; the model's context window is {window}",
+                                   code="context_length_exceeded")
+                max_tokens = min(max_tokens, window - prompt_tokens)  # the room left; hitting it reports finish_reason "length"
+            if not stream and not stop:
                 result = engine.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
                 self._send_json(200, final(
                     result["text"], result.get("finish_reason", "stop"), prompt_tokens, result["tokens_generated"],
@@ -376,30 +474,31 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 return
 
             gen = engine.stream_generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
+            stats = _new_stats()
+            pieces = _stopped_pieces(gen, stop, stats)
+
+            def telemetry() -> Dict[str, Any]:
+                return {"ttft_sec": round(stats["ttft"] or 0.0, 4), "decode_tok_per_sec": round(stats["rate"], 1),
+                        "device": getattr(engine, "device", None)}
+
+            if not stream:
+                try:
+                    text = "".join(pieces)
+                finally:
+                    gen.close()
+                finish = "stop" if stats["stopped"] else engine.last_finish_reason
+                self._send_json(200, final(text, finish, prompt_tokens, stats["tokens"], telemetry()))
+                return
+
             self._begin_sse()
             try:
                 if chat:
                     self._sse(chunk(None, None, role=True))
-                started = time.perf_counter()
-                tokens, ttft, rate = 0, None, 0.0
-                for token_chunk, _, tok_per_sec in gen:
-                    if ttft is None:
-                        ttft = time.perf_counter() - started
-                    tokens += 1
-                    rate = tok_per_sec
-                    self._sse(chunk(token_chunk, None))
-                self._sse(chunk(None, engine.last_finish_reason))
+                for piece in pieces:
+                    self._sse(chunk(piece, None))
+                self._sse(chunk(None, "stop" if stats["stopped"] else engine.last_finish_reason))
                 if include_usage:
-                    # OpenAI's stream_options.include_usage: one last chunk with no choices, carrying the token counts. The
-                    # `telemetry` block (device, timings) is the same one non-streaming responses carry.
-                    self._sse({
-                        "id": cmpl_id, "object": f"{obj}.chunk" if chat else obj, "created": created,
-                        "model": model_id, "choices": [],
-                        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": tokens,
-                                  "total_tokens": prompt_tokens + tokens},
-                        "telemetry": {"ttft_sec": round(ttft or 0.0, 4), "decode_tok_per_sec": round(rate, 1),
-                                      "device": getattr(engine, "device", None)},
-                    })
+                    self._sse(usage_chunk(prompt_tokens, stats["tokens"], telemetry()))
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
@@ -410,9 +509,15 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             finally:
                 gen.close()
 
-    def _generate_ollama(self, resolved, messages, stream, max_tokens, temperature, top_p, chunk, final):
-        options = {"num_predict": max_tokens, "temperature": temperature, "top_p": top_p}
-        it = stream_ollama_chat(resolved["id"], messages, options)
+    def _generate_ollama(self, resolved, messages, stream, max_tokens, temperature, top_p, stop, include_usage,
+                         chunk, final, usage_chunk):
+        options: Dict[str, Any] = {"num_predict": max_tokens, "temperature": temperature, "top_p": top_p}
+        if stop:
+            options["stop"] = list(stop)  # Ollama applies stop sequences itself
+        # Ollama wants plain-text content; OpenAI clients may send a list of parts.
+        text_messages = [{"role": m.get("role", "user"), "content": flatten_content(m.get("content"))} for m in messages]
+        stats: Dict[str, Any] = {}
+        it = stream_ollama_chat(resolved["id"], text_messages, options, stats=stats)
         try:
             first = next(it, None)  # surface connection errors before any headers are sent
         except Exception as ex:
@@ -428,7 +533,8 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 text = "".join(chunks())
             except Exception as ex:
                 raise ApiError(502, f"Ollama backend error: {ex}", "server_error", "backend_unavailable")
-            self._send_json(200, final(text, "stop", None, None))
+            self._send_json(200, final(text, stats.get("finish_reason", "stop"),
+                                       stats.get("prompt_tokens"), stats.get("completion_tokens")))
             return
 
         self._begin_sse()
@@ -436,7 +542,9 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             self._sse(chunk(None, None, role=True))
             for piece in chunks():
                 self._sse(chunk(piece, None))
-            self._sse(chunk(None, "stop"))
+            self._sse(chunk(None, stats.get("finish_reason", "stop")))
+            if include_usage and "prompt_tokens" in stats and "completion_tokens" in stats:
+                self._sse(usage_chunk(stats["prompt_tokens"], stats["completion_tokens"]))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):

@@ -13,7 +13,22 @@ versions may include breaking changes).
   about 1.4 MB per prompt token and is not released; on Phi-4-mini with 4500 prompt tokens the peak fell from 11.7 GB to 6.6 GB with a
   chunk of 256; on two other models the peak fell by 54% and 5% while time to first token rose by 110% and 33%, so it stays off by default. See [Devices & CUDA](https://senssei.github.io/prism-local/devices/#gpu-memory-and-long-prompts).
 
+- `stop` on chat and legacy completions (a string or up to 4 strings): text is cut at the first match, held-back partial matches never leak, and
+  generation aborts. Previously it was ignored.
+- ONNX `max_tokens` is capped to the room left in the model's `context_length` (from `genai_config.json`); a prompt that fills the window is a
+  `400 context_length_exceeded` instead of a failure inside the engine.
+- Ollama responses carry `usage` and the real `finish_reason` (`length` when it hit `max_tokens`), and honour `stream_options.include_usage`.
+- `$OLLAMA_HOST` selects the Ollama daemon.
+
 ### Changed
+- The chat template is taken from the model's own `chat_template` (`chat_template.jinja`, `chat_template.json` or `tokenizer_config.json`) when it has one Prism
+  knows, and only otherwise guessed from the name. Checked against the templates of Phi-3.5, Phi-4, Phi-4-mini, Qwen2.5-Coder and Qwen3: Prism's prompt is
+  now identical to the rendered Jinja for all five.
+- Phi-4 and Phi-4-mini get their own formats (`<|im_start|>…<|im_sep|>`, and `<|role|>…<|end|>` without newlines). Both were sent the Phi-3 format, and Phi-4 (14B)
+  is not ChatML-compatible, so its prompts were malformed.
+- Message `content` given as a list of parts (`[{"type": "text", ...}]`) is flattened to its text; it used to appear in the prompt as a Python repr, and Ollama
+  received the raw list.
+- GPU telemetry (NVML) is reused for 2 seconds, so `/health` and `/v1/models` no longer initialise NVML on every call; `prism benchmark` still reads it fresh.
 - `GET /v1/models` and `prism list` show the device a model will run on (`CPU` or `CUDA (GPU)`, following `--device` and the hardware) instead of what its
   files were exported for; the latter is `exported_for` in the API. Under `--device auto` a `generic-cpu` model runs on CUDA when a GPU is present.
 

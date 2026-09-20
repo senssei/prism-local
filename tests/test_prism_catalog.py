@@ -24,6 +24,16 @@ class TestPrismCatalog(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.catalog = ModelCatalog(search_paths=[self.tmp])
 
+    def test_template_comes_from_the_models_own_chat_template(self):
+        d = make_model(self.tmp, "custom-finetune", "phi3")  # the name and type say Phi-3 ...
+        with open(os.path.join(d, "tokenizer_config.json"), "w") as f:
+            json.dump({"chat_template": "{{'<|im_start|>user<|im_sep|>' + m['content'] + '<|im_end|>'}}"}, f)  # ... the file says Phi-4
+        models = {m["name"]: m for m in self.catalog.discover_onnx_models()}
+        self.assertEqual((models["custom-finetune"]["template"], models["custom-finetune"]["template_source"]),
+                         ("phi4_im", "chat_template"))
+        self.assertEqual((models["qwen2.5-coder-7b-onnx"]["template"], models["qwen2.5-coder-7b-onnx"]["template_source"]),
+                         ("chatml", "name"))
+
     def test_discover_onnx_models(self):
         models = {m["name"]: m for m in self.catalog.discover_onnx_models()}
         self.assertEqual(set(models), {"Phi-4-mini-instruct-cuda-gpu", "qwen2.5-coder-7b-onnx",
@@ -31,7 +41,7 @@ class TestPrismCatalog(unittest.TestCase):
         phi = models["Phi-4-mini-instruct-cuda-gpu"]
         self.assertEqual(phi["backend"], "onnx")
         self.assertEqual(phi["device"], "CUDA (GPU)")
-        self.assertEqual(phi["template"], "phi4")
+        self.assertEqual(phi["template"], "phi4_mini")  # by name: this test model has no chat_template file
         self.assertEqual(models["qwen2.5-coder-7b-onnx"]["template"], "chatml")
 
     def _planned(self, model, device=None, gpu=True):

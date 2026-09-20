@@ -10,8 +10,10 @@ import os
 import site
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 _BOOTSTRAPPED = False
 
@@ -137,7 +139,26 @@ class NvmlMemory(ctypes.Structure):
         ("used", ctypes.c_ulonglong),
     ]
 
-def get_gpu_info() -> Dict[str, Any]:
+# NVML is dlopen()ed and initialised on every query, and the server asks on each /health and /v1/models call.
+GPU_INFO_TTL_SEC = 2.0
+_gpu_cache: Optional[Tuple[float, Dict[str, Any]]] = None
+_gpu_cache_lock = threading.Lock()
+
+
+def get_gpu_info(max_age: float = GPU_INFO_TTL_SEC) -> Dict[str, Any]:
+    """GPU telemetry via libnvidia-ml.so.1, reused for up to `max_age` seconds (pass 0 to force a fresh reading,
+    e.g. when measuring VRAM before and after loading a model)."""
+    global _gpu_cache
+    with _gpu_cache_lock:
+        now = time.monotonic()
+        if max_age > 0 and _gpu_cache and now - _gpu_cache[0] < max_age:
+            return dict(_gpu_cache[1])
+        info = _query_gpu_info()
+        _gpu_cache = (time.monotonic(), info)
+        return dict(info)
+
+
+def _query_gpu_info() -> Dict[str, Any]:
     """Queries NVIDIA GPU telemetry via libnvidia-ml.so.1."""
     nvml_paths = [
         "/usr/lib/wsl/lib/libnvidia-ml.so.1",

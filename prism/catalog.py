@@ -12,7 +12,7 @@ from prism.engine import default_device
 from prism.paths import default_model_dir, model_search_paths
 from prism.ollama_bridge import list_ollama_models, pull_ollama_model
 from prism.telemetry import get_gpu_info
-from prism.templates import detect_template
+from prism.templates import resolve_template
 
 CACHE_TTL_SEC = 5.0
 
@@ -123,10 +123,14 @@ class ModelCatalog:
                     cfg_path = model_dir / "genai_config.json"
                     device = "CPU"
                     model_type = ""
+                    context_length = None
                     if cfg_path.exists():
                         try:
                             cfg = json.loads(cfg_path.read_text())
                             model_type = str(cfg.get("model", {}).get("type", ""))
+                            ctx = cfg.get("model", {}).get("context_length")
+                            if isinstance(ctx, int) and ctx > 0:
+                                context_length = ctx
                             opts = cfg.get("session_options", {}).get("provider_options", [])
                             if any("cuda" in opt for opt in opts):
                                 device = "CUDA (GPU)"
@@ -136,6 +140,7 @@ class ModelCatalog:
                         device = "CUDA (GPU)"
 
                     if name not in found:
+                        template, template_source = resolve_template(name, model_type, str(model_dir))
                         found[name] = {
                             "id": name,
                             "name": name,
@@ -145,7 +150,9 @@ class ModelCatalog:
                             "size_mb": round(size_bytes / (1024 * 1024), 1),
                             "path": str(model_dir),
                             "backend": "onnx",
-                            "template": detect_template(name, model_type),
+                            "template": template,
+                            "template_source": template_source,
+                            "context_length": context_length,
                         }
         return list(found.values())
 

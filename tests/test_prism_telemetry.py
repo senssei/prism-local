@@ -113,5 +113,27 @@ class TestPrismTelemetry(unittest.TestCase):
             self.assertIn("vram_total_mb", dev)
 
 
+class TestGpuInfoCache(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(telemetry, "_query_gpu_info", side_effect=lambda: {"available": True, "n": next(self.count)})
+        self.query = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.count = iter(range(100))
+        telemetry._gpu_cache = None
+        self.addCleanup(setattr, telemetry, "_gpu_cache", None)
+
+    def test_repeated_calls_share_one_reading(self):
+        self.assertEqual(get_gpu_info()["n"], get_gpu_info()["n"])
+        self.assertEqual(self.query.call_count, 1)
+
+    def test_max_age_zero_forces_a_fresh_reading(self):
+        get_gpu_info()
+        self.assertEqual(get_gpu_info(max_age=0)["n"], 1)
+
+    def test_callers_cannot_corrupt_the_cache(self):
+        get_gpu_info()["available"] = False
+        self.assertTrue(get_gpu_info()["available"])
+
+
 if __name__ == "__main__":
     unittest.main()

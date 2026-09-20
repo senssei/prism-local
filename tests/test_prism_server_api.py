@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from prism.catalog import ModelCatalog
-from prism.server import ActiveEngineManager, create_server
+from prism.server import ActiveEngineManager, StopMatcher, create_server
 from tests.fakes import FakeEngine, make_model
 
 
@@ -255,6 +255,8 @@ class TestOllamaRouting(ServerTestBase):
                 raise self.backend_error
             yield "Hi"
             yield " there"
+            if kw.get("stats") is not None:
+                kw["stats"].update(getattr(self, "ollama_stats", {}))
 
         patcher = patch("prism.server.stream_ollama_chat", side_effect=fake_stream)
         patcher.start()
@@ -292,6 +294,124 @@ class TestOllamaRouting(ServerTestBase):
         resp, data = self.request("POST", "/v1/completions", {"model": "tiny:1b", "prompt": "hello"})
         self.assertEqual(data["choices"][0]["text"], "Hi there")
         self.assertEqual(self.calls[-1][1], [{"role": "user", "content": "hello"}])
+
+    def test_usage_and_finish_reason_come_from_the_daemon(self):
+        self.ollama_stats = {"prompt_tokens": 5, "completion_tokens": 2, "finish_reason": "length"}
+        _, data = self.chat(model="tiny:1b")
+        self.assertEqual(data["choices"][0]["finish_reason"], "length")
+        self.assertEqual(data["usage"], {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
+
+    def test_stream_usage_chunk_only_when_asked_and_known(self):
+        self.ollama_stats = {"prompt_tokens": 5, "completion_tokens": 2, "finish_reason": "stop"}
+
+        def events(**extra):
+            _, raw = self.request("POST", "/v1/chat/completions",
+                                  {"model": "tiny:1b", "stream": True, "messages": [{"role": "user", "content": "x"}],
+                                   **extra}, raw=True)
+            return [json.loads(e[len("data: "):]) for e in raw.decode().strip().split("\n\n")[:-1]]
+
+        last = events(stream_options={"include_usage": True})[-1]
+        self.assertEqual((last["choices"], last["usage"]["total_tokens"]), ([], 7))
+        self.assertFalse(any("usage" in c for c in events()))
+        self.ollama_stats = {}  # the daemon reported no counts: no chunk rather than made-up numbers
+        self.assertFalse(any("usage" in c for c in events(stream_options={"include_usage": True})))
+
+    def test_stop_is_passed_on_and_content_parts_are_flattened(self):
+        self.chat(model="tiny:1b", stop="###", messages=[
+            {"role": "user", "content": [{"type": "text", "text": "hello"}, {"type": "image_url", "image_url": {}}]}])
+        _, messages, options = self.calls[-1]
+        self.assertEqual(options["stop"], ["###"])
+        self.assertEqual(messages, [{"role": "user", "content": "hello"}])
+
+
+class TestStopMatcher(unittest.TestCase):
+    def run_matcher(self, stops, pieces):
+        m = StopMatcher(stops)
+        out = "".join(m.feed(p) for p in pieces)
+        return out if m.hit else out + m.flush(), m.hit
+
+    def test_no_stops_passes_everything_through(self):
+        self.assertEqual(self.run_matcher([], ["a", "b"]), ("ab", False))
+
+    def test_cuts_at_the_stop_and_drops_the_rest(self):
+        self.assertEqual(self.run_matcher(["END"], ["Hello ", "wor", "ld END", " tail"]), ("Hello world ", True))
+
+    def test_stop_split_across_pieces_never_leaks(self):
+        self.assertEqual(self.run_matcher(["cd"], ["ab", "c", "d", "e"]), ("ab", True))
+
+    def test_held_back_prefix_is_released_when_it_turns_out_not_to_be_a_stop(self):
+        self.assertEqual(self.run_matcher(["cd"], ["a", "c", "x"]), ("acx", False))
+        self.assertEqual(self.run_matcher(["cd"], ["a", "c"]), ("ac", False))  # flushed at the end
+
+    def test_earliest_of_several_stops_wins(self):
+        self.assertEqual(self.run_matcher(["ZZ", "b"], ["aabZZ"]), ("aa", True))
+
+
+class TestStopSequences(ServerTestBase):
+    def setUp(self):
+        super().setUp()
+        FakeEngine.pieces = ["Hello", " wor", "ld END", " tail"]
+
+    def test_non_stream_cuts_text_and_reports_stop(self):
+        resp, data = self.chat(stop=["END"])
+        self.assertEqual(data["choices"][0]["message"]["content"], "Hello world ")
+        self.assertEqual(data["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(data["usage"]["completion_tokens"], 3)  # generation aborted at the third token
+        self.assertEqual(FakeEngine.produced, 3)
+
+    def test_stream_cuts_text_and_aborts_generation(self):
+        _, raw = self.request("POST", "/v1/chat/completions",
+                              {"model": "qwen-coder-gpu", "stream": True, "stop": "END",
+                               "messages": [{"role": "user", "content": "hi"}]}, raw=True)
+        chunks = [json.loads(e[len("data: "):]) for e in raw.decode().strip().split("\n\n")[:-1]]
+        self.assertEqual("".join(c["choices"][0]["delta"].get("content", "") for c in chunks), "Hello world ")
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(FakeEngine.produced, 3)
+
+    def test_without_a_match_the_full_text_arrives(self):
+        _, data = self.chat(stop="nope")
+        self.assertEqual(data["choices"][0]["message"]["content"], "Hello world END tail")
+
+    def test_invalid_stop_is_a_400(self):
+        for bad in (5, ["a", 1], [""], ["a", "b", "c", "d", "e"], {"x": 1}):
+            resp, data = self.chat(stop=bad)
+            self.assertEqual(resp.status, 400, bad)
+            self.assertIn("'stop'", data["error"]["message"])
+
+
+class TestContextWindow(ServerTestBase):
+    def setUp(self):
+        super().setUp()
+        # FakeEngine counts whitespace-separated words; this prompt is 3 of them
+        make_model(self.tmp, "tiny-ctx", "phi3", context_length=4)
+        make_model(self.tmp, "no-room", "phi3", context_length=3)
+
+    def test_max_tokens_is_clamped_to_the_room_left(self):
+        _, data = self.chat(model="tiny-ctx", max_tokens=1000)
+        self.assertEqual(data["usage"]["completion_tokens"], 1)
+        self.assertEqual(data["choices"][0]["finish_reason"], "length")
+
+    def test_prompt_that_fills_the_window_is_a_400(self):
+        resp, data = self.chat(model="no-room")
+        self.assertEqual((resp.status, data["error"]["code"]), (400, "context_length_exceeded"))
+        resp, _ = self.chat(model="no-room", stream=True)  # an error before any header, so still JSON
+        self.assertEqual(resp.status, 400)
+        resp, _ = self.chat(model="qwen-coder-gpu")  # the lock was released
+        self.assertEqual(resp.status, 200)
+
+    def test_models_without_a_known_window_are_not_limited(self):
+        _, data = self.chat(model="qwen-coder-gpu", max_tokens=1000)
+        self.assertEqual(data["choices"][0]["message"]["content"], "Hello world")
+        self.assertEqual(data["choices"][0]["finish_reason"], "stop")
+
+
+class TestContentParts(ServerTestBase):
+    def test_text_parts_reach_the_prompt_and_other_parts_are_dropped(self):
+        resp, _ = self.chat(messages=[{"role": "user", "content": [
+            {"type": "text", "text": "hello"}, {"type": "image_url", "image_url": {"url": "x"}}]}])
+        self.assertEqual(resp.status, 200)
+        self.assertIn("hello", FakeEngine.prompts[-1])
+        self.assertNotIn("image_url", FakeEngine.prompts[-1])
 
 
 class TestClientDisconnect(ServerTestBase):

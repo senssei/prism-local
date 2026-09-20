@@ -50,17 +50,18 @@ Trailing slashes are accepted.
 | `model` | Required. Same resolution rules as the [CLI](cli.md). `ollama:` names, and installed Ollama names, route to Ollama. |
 | `messages` | Required, non-empty list. The chat template is chosen per model ([Models](models.md#chat-templates)). |
 | `stream` | `true` for server-sent events |
-| `stream_options.include_usage` | With `stream`, add a last chunk that carries `usage` and `telemetry` (see Responses). ONNX models only |
-| `max_tokens` / `max_completion_tokens` | Default 512, must be ≥ 1 |
+| `stream_options.include_usage` | With `stream`, add a last chunk that carries `usage` (and, for ONNX models, `telemetry`); see Responses. Ollama models only when the daemon reports counts |
+| `stop` | A string or a list of up to 4 strings. Generation ends at the first match, which is not included in the text; `finish_reason` is `stop` |
+| `max_tokens` / `max_completion_tokens` | Default 512, must be ≥ 1. For ONNX models whose `genai_config.json` states a `context_length`, it is capped to the room left after the prompt (`finish_reason` is then `length`); a prompt that fills the window is a `400` `context_length_exceeded` |
 | `temperature` | Default 0.1; `0` means greedy decoding |
 | `top_p` | Default 0.9 |
 
-Other OpenAI fields (`stop`, `n`, `tools`, `response_format`, …) are **accepted and ignored**.
+Message `content` may be a string or a list of parts; text parts are used and others (images, …) are dropped. Other OpenAI fields (`n`, `tools`, `response_format`, …) are **accepted and ignored**.
 
 ## Responses
 
 Non-streaming responses follow the OpenAI shape. `finish_reason` is `stop` (end of sequence) or `length` (hit `max_tokens`),
-and `usage` uses the model tokenizer. Ollama responses have no `usage`. ONNX responses add a Prism extension:
+and `usage` uses the model tokenizer. Ollama responses carry the `finish_reason` and `usage` the daemon reports (none if it reports none). ONNX responses add a Prism extension:
 
 ```json
 "telemetry": { "ttft_sec": 0.45, "decode_tok_per_sec": 85.2, "device": "cuda" }
@@ -80,6 +81,7 @@ All errors are JSON: `{"error": {"message", "type", "param", "code"}}`.
 |---|---|---|
 | 400 | *(none)* | Invalid JSON, missing/invalid `messages`, `model`, or a numeric field |
 | 400 | `ambiguous_model` | The name matches several models; the message lists them |
+| 400 | `context_length_exceeded` | The prompt fills the model's context window (ONNX models with a known `context_length`) |
 | 401 | `invalid_api_key` | Missing or wrong bearer token |
 | 403 | `host_not_allowed` | Non-loopback `Host` header on a loopback bind |
 | 404 | `model_not_found` / `not_found` | Unknown model / unknown route |

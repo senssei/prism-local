@@ -8,7 +8,7 @@ Prism discovers ONNX Runtime GenAI model folders (containing `genai_config.json`
 2. `~/.prism/models`
 3. the Foundry Local cache (`~/.foundry/cache/models`)
 
-Installed **Ollama** models (GGUF) are listed too when the Ollama daemon is reachable at `localhost:11434`.
+Installed **Ollama** models (GGUF) are listed too when the Ollama daemon is reachable at `localhost:11434` (or `$OLLAMA_HOST`).
 Discovery results are cached for 5 seconds.
 
 ## Name resolution
@@ -58,16 +58,24 @@ The variant subfolder (for example `gpu/gpu-int4-rtn-block-32`) is flattened int
 
 ## Chat templates
 
-ONNX GenAI models need the chat format applied by the caller. Prism picks a template per model from its name and the
-`model.type` in `genai_config.json`:
+ONNX GenAI models need the chat format applied by the caller. Prism picks one of its templates per model, in this order:
 
-| Family (match) | Template |
-|---|---|
-| `phi` | Phi (`<|system|>` … `<|end|>`) |
-| `llama` | Llama 3 (`<|start_header_id|>` …) |
-| `deepseek` | DeepSeek (`<｜User｜>` / `<｜Assistant｜>`) |
-| anything else, including Qwen | ChatML (`<|im_start|>` …) |
+1. **The model's own chat template**: `chat_template.jinja`, `chat_template.json`, or the `chat_template` key of `tokenizer_config.json`.
+   It is what the model was trained with, so it outranks the name. Prism does not run the Jinja; it recognises the family from the
+   special tokens the template writes.
+2. **The name** and the `model.type` in `genai_config.json`, when there is no template file or it is in a format Prism has no
+   template for (Gemma and Mistral, for example).
 
-The detected template is stored on each model (`prism/templates.py`). If a model family needs a different format, add a branch to
-`format_prompt` and `detect_template` there; tests for both live in `tests/test_prism_templates.py`. Ollama models apply their own
-templates server-side.
+| Family | Recognised by | Template |
+|---|---|---|
+| `phi4` | `<|end|>`; name `phi` | Phi-3 / 3.5 (`<|system|>\n` … `<|end|>\n`) |
+| `phi4_mini` | `<|end|>` with role-built tags; name `phi-4-mini` | Phi-4-mini (`<|user|>` … `<|end|>`, no newlines) |
+| `phi4_im` | `<|im_sep|>`; name `phi-4` | Phi-4 (`<|im_start|>user<|im_sep|>` … `<|im_end|>`) |
+| `llama3` | `<|start_header_id|>`; name `llama` | Llama 3 |
+| `deepseek` | `<｜User｜>` / `<｜Assistant｜>`; name `deepseek` | DeepSeek |
+| `chatml` | `<|im_start|>`; anything else, including Qwen | ChatML |
+
+`GET /v1/models` does not show it, but the catalog keeps the choice as `template` and where it came from as `template_source`
+(`chat_template` or `name`). A model whose template Prism does not know falls back to the name, then to ChatML, which can be
+wrong for it. To support a new format, add a branch to `format_prompt` and a marker to `classify_chat_template` in
+`prism/templates.py`; tests for both live in `tests/test_prism_templates.py`. Ollama models apply their own templates server-side.

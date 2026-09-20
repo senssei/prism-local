@@ -7,12 +7,15 @@ import time
 from typing import List
 
 
-def make_model(root: str, name: str, model_type: str = "phi3") -> str:
+def make_model(root: str, name: str, model_type: str = "phi3", context_length=None) -> str:
     """Creates a minimal ONNX GenAI model folder (genai_config.json + stub weights)."""
     d = os.path.join(root, name)
     os.makedirs(d)
+    model = {"type": model_type}
+    if context_length:
+        model["context_length"] = context_length
     with open(os.path.join(d, "genai_config.json"), "w") as f:
-        json.dump({"model": {"type": model_type}}, f)
+        json.dump({"model": model}, f)
     with open(os.path.join(d, "model.onnx"), "wb") as f:
         f.write(b"\0" * 1024)
     return d
