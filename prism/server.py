@@ -15,7 +15,8 @@ import time
 import uuid
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
-from prism.catalog import AmbiguousModelError, ModelCatalog
+from prism import PRISM_BANNER
+from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from prism.engine import Engine, OnnxGenAiEngine, format_prompt
 from prism.ollama_bridge import stream_ollama_chat
 from prism.telemetry import get_gpu_info
@@ -87,6 +88,12 @@ class PrismHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self.api_key = api_key
         self.cors_origins = list(cors_origins)
         self.bound_host = addr[0]
+
+
+def _include_usage(req: Dict[str, Any]) -> bool:
+    """Whether the request asked for token usage in the last streamed chunk (`stream_options.include_usage`)."""
+    options = req.get("stream_options")
+    return isinstance(options, dict) and bool(options.get("include_usage"))
 
 
 def _int_param(req: Dict[str, Any], keys: Sequence[str], default: int) -> int:
@@ -242,7 +249,8 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 "created": int(time.time()),
                 "owned_by": m.get("engine", "prism"),
                 "size_mb": m.get("size_mb", 0),
-                "device": m.get("device", "GPU"),
+                "device": planned_device(m),  # where it will run, not what the files were exported for
+                **({"exported_for": m.get("device")} if m.get("backend") == "onnx" else {}),
             }
             for m in models
         ]
@@ -285,6 +293,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             temperature=_float_param(req, "temperature", 0.1),
             top_p=_float_param(req, "top_p", 0.9),
             chat=True,
+            include_usage=_include_usage(req),
         )
 
     def _handle_completions(self):
@@ -306,9 +315,11 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             top_p=_float_param(req, "top_p", 0.9),
             chat=False,
             raw_prompt=prompt,
+            include_usage=_include_usage(req),
         )
 
-    def _generate(self, resolved, model_id, messages, stream, max_tokens, temperature, top_p, chat, raw_prompt=None):
+    def _generate(self, resolved, model_id, messages, stream, max_tokens, temperature, top_p, chat, raw_prompt=None,
+                  include_usage=False):
         obj = "chat.completion" if chat else "text_completion"
         cmpl_id = f"{'chatcmpl' if chat else 'cmpl'}-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
@@ -369,9 +380,26 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             try:
                 if chat:
                     self._sse(chunk(None, None, role=True))
-                for token_chunk, _, _ in gen:
+                started = time.perf_counter()
+                tokens, ttft, rate = 0, None, 0.0
+                for token_chunk, _, tok_per_sec in gen:
+                    if ttft is None:
+                        ttft = time.perf_counter() - started
+                    tokens += 1
+                    rate = tok_per_sec
                     self._sse(chunk(token_chunk, None))
                 self._sse(chunk(None, engine.last_finish_reason))
+                if include_usage:
+                    # OpenAI's stream_options.include_usage: one last chunk with no choices, carrying the token counts. The
+                    # `telemetry` block (device, timings) is the same one non-streaming responses carry.
+                    self._sse({
+                        "id": cmpl_id, "object": f"{obj}.chunk" if chat else obj, "created": created,
+                        "model": model_id, "choices": [],
+                        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": tokens,
+                                  "total_tokens": prompt_tokens + tokens},
+                        "telemetry": {"ttft_sec": round(ttft or 0.0, 4), "decode_tok_per_sec": round(rate, 1),
+                                      "device": getattr(engine, "device", None)},
+                    })
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
@@ -465,6 +493,7 @@ def start_server(
     """Launches the multi-threaded OpenAI REST server."""
     server = create_server(port=port, host=host, api_key=api_key, cors_origins=cors_origins)
     with server:
+        print(f"\n{PRISM_BANNER}\n")
         print(f"🚀 prism OpenAI Server active at http://{host}:{server.server_address[1]}/v1")
         print("   Listening for chat completions and models list.")
         if host not in LOOPBACK_HOSTS and not api_key:

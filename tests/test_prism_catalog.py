@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from prism.catalog import AmbiguousModelError, ModelCatalog
+from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from tests.fakes import make_model
 
 
@@ -33,6 +33,29 @@ class TestPrismCatalog(unittest.TestCase):
         self.assertEqual(phi["device"], "CUDA (GPU)")
         self.assertEqual(phi["template"], "phi4")
         self.assertEqual(models["qwen2.5-coder-7b-onnx"]["template"], "chatml")
+
+    def _planned(self, model, device=None, gpu=True):
+        env = {"PRISM_DEVICE": device} if device else {}
+        with patch.dict(os.environ, env, clear=False), patch("prism.catalog.get_gpu_info", return_value={"available": gpu}):
+            if not device:
+                os.environ.pop("PRISM_DEVICE", None)
+            return planned_device(model)
+
+    def test_planned_device_is_where_the_model_will_run_not_what_it_was_exported_for(self):
+        cpu_variant = {"backend": "onnx", "device": "CPU", "name": "Phi-4-mini-instruct-generic-cpu"}
+        cuda_variant = {"backend": "onnx", "device": "CUDA (GPU)", "name": "Phi-4-mini-instruct-cuda-gpu"}
+        # auto: any ONNX model runs on CUDA when a GPU is present, including a `generic-cpu` variant
+        self.assertEqual(self._planned(cpu_variant, gpu=True), "CUDA (GPU)")
+        self.assertEqual(self._planned(cpu_variant, gpu=False), "CPU")
+        self.assertEqual(self._planned(cuda_variant, gpu=False), "CPU")
+        # an explicit device wins over both the files and the hardware
+        self.assertEqual(self._planned(cuda_variant, device="cpu"), "CPU")
+        self.assertEqual(self._planned(cpu_variant, device="cuda", gpu=False), "CUDA (GPU)")
+
+    def test_planned_device_keeps_the_label_of_ollama_models_and_survives_a_bad_setting(self):
+        ollama = {"backend": "ollama", "device": "GPU"}
+        self.assertEqual(self._planned(ollama, device="cpu"), "GPU")
+        self.assertEqual(self._planned({"backend": "onnx", "device": "CPU"}, device="tpu"), "CPU")
 
     def test_list_all_models_includes_ollama(self):
         backends = {m["backend"] for m in self.catalog.list_all_models(include_ollama=True)}

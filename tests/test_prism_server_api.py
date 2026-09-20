@@ -180,6 +180,68 @@ class TestHealthAndModels(ServerTestBase):
         self.assertEqual(ids, {"alpha-phi-cuda-gpu", "beta-phi-cuda-gpu", "qwen-coder-gpu", "ollama:tiny:1b"})
 
 
+    def test_models_report_where_they_will_run_and_what_the_files_were_exported_for(self):
+        with patch("prism.catalog.get_gpu_info", return_value={"available": True}), \
+                patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PRISM_DEVICE", None)
+            _, data = self.request("GET", "/v1/models")
+        onnx = [m for m in data["data"] if m["id"] != "ollama:tiny:1b"]
+        self.assertTrue(onnx)
+        for model in onnx:
+            self.assertEqual(model["device"], "CUDA (GPU)")
+            self.assertIn("exported_for", model)
+        with patch("prism.catalog.get_gpu_info", return_value={"available": True}), \
+                patch.dict(os.environ, {"PRISM_DEVICE": "cpu"}):
+            _, data = self.request("GET", "/v1/models")
+        self.assertTrue(all(m["device"] == "CPU" for m in data["data"] if m["id"] != "ollama:tiny:1b"))
+
+
+class TestStreamUsage(ServerTestBase):
+    """OpenAI's stream_options.include_usage: token counts (and Prism's device telemetry) in the last streamed chunk."""
+
+    def stream(self, path, body):
+        resp, raw = self.request("POST", path, body, raw=True)
+        self.assertEqual(resp.status, 200)
+        events = [e[len("data: "):] for e in raw.decode().strip().split("\n\n")]
+        self.assertEqual(events[-1], "[DONE]")
+        return [json.loads(e) for e in events[:-1]]
+
+    def chat_body(self, **extra):
+        return {"model": "qwen-coder-gpu", "stream": True, "messages": [{"role": "user", "content": "hi there"}], **extra}
+
+    def test_usage_and_telemetry_arrive_in_a_last_chunk_without_choices(self):
+        chunks = self.stream("/v1/chat/completions", self.chat_body(stream_options={"include_usage": True}))
+        last = chunks[-1]
+        self.assertEqual(last["choices"], [])
+        self.assertEqual(last["usage"]["completion_tokens"], 3)  # FakeEngine streams three pieces
+        self.assertGreater(last["usage"]["prompt_tokens"], 0)
+        self.assertEqual(last["usage"]["total_tokens"], last["usage"]["prompt_tokens"] + 3)
+        self.assertEqual(last["telemetry"]["device"], "cpu")  # FakeEngine.device
+        self.assertGreater(last["telemetry"]["ttft_sec"], 0)
+        # the finish chunk still comes before it, so clients that read choices see the same stream as before
+        self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
+
+    def test_no_usage_chunk_unless_asked(self):
+        chunks = self.stream("/v1/chat/completions", self.chat_body())
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
+        self.assertFalse(any("usage" in c for c in chunks))
+        chunks = self.stream("/v1/chat/completions", self.chat_body(stream_options={"include_usage": False}))
+        self.assertFalse(any("usage" in c for c in chunks))
+        chunks = self.stream("/v1/chat/completions", self.chat_body(stream_options="yes"))  # malformed: ignored
+        self.assertFalse(any("usage" in c for c in chunks))
+
+    def test_legacy_completions_support_it_too(self):
+        chunks = self.stream("/v1/completions", {"model": "qwen-coder-gpu", "prompt": "hello", "stream": True,
+                                                 "stream_options": {"include_usage": True}})
+        self.assertEqual(chunks[-1]["choices"], [])
+        self.assertEqual(chunks[-1]["usage"]["completion_tokens"], 3)
+
+    def test_length_cap_is_reflected_in_the_count(self):
+        chunks = self.stream("/v1/chat/completions", self.chat_body(max_tokens=2, stream_options={"include_usage": True}))
+        self.assertEqual(chunks[-1]["usage"]["completion_tokens"], 2)
+        self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "length")
+
+
 class TestOllamaRouting(ServerTestBase):
     def setUp(self):
         super().setUp()

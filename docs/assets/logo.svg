@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="100%" height="100%">
+  <defs>
+    <!-- Glow filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Gradients -->
+    <!-- Facet 1: Left Pillar (Indigo to Cyan) -->
+    <linearGradient id="pStem" x1="0%" y1="100%" x2="50%" y2="0%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="50%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+
+    <!-- Facet 2: Upper P Loop (Cyan to Vivid Magenta) -->
+    <linearGradient id="pLoop" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="40%" stop-color="#818cf8" />
+      <stop offset="75%" stop-color="#c084fc" />
+      <stop offset="100%" stop-color="#f43f5e" />
+    </linearGradient>
+
+    <!-- Facet 3: Prism Base / Refraction Facet (Violet to Indigo) -->
+    <linearGradient id="prismFacet" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1" />
+      <stop offset="50%" stop-color="#4f46e5" />
+      <stop offset="100%" stop-color="#1e1b4b" />
+    </linearGradient>
+
+    <!-- Refraction Beam / Accent Highlight -->
+    <linearGradient id="laserBeam" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.3" />
+    </linearGradient>
+  </defs>
+
+  <!-- Ambient Backdrop Glow -->
+  <circle cx="138" cy="128" r="75" fill="#6366f1" opacity="0.15" filter="url(#glow)" />
+
+  <g transform="translate(4, 0)">
+    <!-- Bottom Right Facet (Prism Depth & Shadow) -->
+    <path d="M 112 142 L 188 142 L 204 196 L 102 196 Z"
+          fill="url(#prismFacet)"
+          opacity="0.85" />
+
+    <!-- Stylized Refraction Ray inside facet -->
+    <line x1="72" y1="142" x2="188" y2="142" stroke="url(#laserBeam)" stroke-width="2.5" stroke-linecap="round" />
+
+    <!-- Left Ascending Stem (The Left Slope of the Prism) -->
+    <path d="M 64 196 L 118 48 L 148 48 L 94 196 Z"
+          fill="url(#pStem)" />
+
+    <!-- Upper "P" Loop (Refracting Arc & Return) -->
+    <path d="M 124 48 C 168 48 206 66 206 102 C 206 136 174 146 136 146 L 106 146 L 116 118 L 138 118 C 158 118 174 112 174 98 C 174 82 152 76 132 76 L 114 76 L 124 48 Z"
+          fill="url(#pLoop)" />
+
+  </g>
+</svg>

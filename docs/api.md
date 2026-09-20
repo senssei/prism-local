@@ -36,7 +36,7 @@ curl -s http://127.0.0.1:5272/v1/chat/completions -H 'Content-Type: application/
 
 | Method and path | Purpose |
 |---|---|
-| `GET /v1/models` | ONNX and Ollama models. Extra fields: `size_mb`, `device` (a hint), `owned_by` (engine). |
+| `GET /v1/models` | ONNX and Ollama models. Extra fields: `size_mb`, `owned_by` (engine), `device` (where the model will run: `CPU` or `CUDA (GPU)`, following `--device` and the hardware), and for ONNX models `exported_for` (what the model files were built for; a `generic-cpu` variant still runs on CUDA under `--device auto`). |
 | `POST /v1/chat/completions` | Chat completion, streaming or not |
 | `POST /v1/completions` | Legacy text completion. ONNX models get the raw prompt (no chat template). Ollama models get it as one user message. |
 | `GET /health` (also `/v1/health`, `/v1/status`) | Status, `active_model`, `active_device` (`cuda`/`cpu`/`null` when nothing is loaded) and GPU telemetry. **No auth required.** |
@@ -50,6 +50,7 @@ Trailing slashes are accepted.
 | `model` | Required. Same resolution rules as the [CLI](cli.md). `ollama:` names, and installed Ollama names, route to Ollama. |
 | `messages` | Required, non-empty list. The chat template is chosen per model ([Models](models.md#chat-templates)). |
 | `stream` | `true` for server-sent events |
+| `stream_options.include_usage` | With `stream`, add a last chunk that carries `usage` and `telemetry` (see Responses). ONNX models only |
 | `max_tokens` / `max_completion_tokens` | Default 512, must be ≥ 1 |
 | `temperature` | Default 0.1; `0` means greedy decoding |
 | `top_p` | Default 0.9 |
@@ -66,7 +67,9 @@ and `usage` uses the model tokenizer. Ollama responses have no `usage`. ONNX res
 ```
 
 Streaming sends `chat.completion.chunk` events: a first chunk with `delta: {"role": "assistant"}`, content deltas, a final chunk
-with the `finish_reason`, then `data: [DONE]`. If generation fails after streaming has begun, an event
+with the `finish_reason`, then `data: [DONE]`. With `stream_options: {"include_usage": true}` one more chunk with an empty `choices` list
+comes after the `finish_reason` chunk and before `[DONE]`, carrying `usage` (`prompt_tokens`, `completion_tokens`, `total_tokens`, from the model
+tokenizer) and the same `telemetry` block as non-streaming responses; without the option the stream is unchanged. If generation fails after streaming has begun, an event
 `data: {"error": {...}}` is sent before `[DONE]`. If the client disconnects, generation stops.
 
 ## Errors

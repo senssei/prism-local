@@ -8,7 +8,8 @@ import json
 import os
 import sys
 
-from prism.catalog import AmbiguousModelError, ModelCatalog
+from prism import PRISM_BANNER
+from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from prism.chat import run_interactive_chat
 from prism.benchmark import run_benchmark
 from prism.server import start_server
@@ -19,7 +20,8 @@ from prism.connectors import connect_cursor, connect_cline, connect_mcp
 
 
 def cmd_status(args):
-    print("\n🖥️  PRISM SYSTEM & HARDWARE STATUS")
+    print(f"\n{PRISM_BANNER}\n")
+    print("🖥️  PRISM SYSTEM & HARDWARE STATUS")
     print("=" * 65)
     gpu = get_gpu_info()
     if gpu.get("available"):
@@ -41,7 +43,8 @@ def cmd_status(args):
 
 def cmd_doctor(args):
     bootstrap_cuda_env()
-    print("\n🩺 PRISM ENVIRONMENT DOCTOR")
+    print(f"\n{PRISM_BANNER}\n")
+    print("🩺 PRISM ENVIRONMENT DOCTOR")
     print("=" * 65)
     gpu = get_gpu_info()
     if gpu.get("available"):
@@ -77,7 +80,7 @@ def cmd_list(args):
     print(f"{'NAME / ID':<40} {'ENGINE':<22} {'SIZE':<10} {'DEVICE'}")
     print("-" * 75)
     for m in models:
-        dev = m.get("device", "GPU" if "cuda" in m["name"].lower() else "CPU/GPU")
+        dev = planned_device(m)
         size_str = f"{m.get('size_mb', 0)} MB"
         print(f"{m['id']:<40} {m.get('engine', 'Unknown'):<22} {size_str:<10} {dev}")
     print("=" * 75)

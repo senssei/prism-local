@@ -8,12 +8,33 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from prism.engine import default_device
 from prism.paths import default_model_dir, model_search_paths
 from prism.ollama_bridge import list_ollama_models, pull_ollama_model
 from prism.telemetry import get_gpu_info
 from prism.templates import detect_template
 
 CACHE_TTL_SEC = 5.0
+
+
+def planned_device(model: Dict[str, Any]) -> str:
+    """The device a model will actually run on, for listings.
+
+    The catalog's own `device` only says what the model files were exported for (a `generic-cpu` or a `cuda` variant). Prism
+    ignores that: it picks the execution provider from --device / $PRISM_DEVICE, and `auto` uses CUDA whenever a GPU is present,
+    so a `generic-cpu` model runs on the GPU. Ollama models keep the catalog's label.
+    """
+    if model.get("backend") != "onnx":
+        return model.get("device", "GPU")
+    try:
+        requested = default_device()
+    except ValueError:
+        return model.get("device", "CPU")
+    if requested == "cpu":
+        return "CPU"
+    if requested == "cuda":
+        return "CUDA (GPU)"
+    return "CUDA (GPU)" if get_gpu_info().get("available") else "CPU"
 
 
 class AmbiguousModelError(ValueError):

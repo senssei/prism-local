@@ -1,12 +1,16 @@
-# Prism
+<div align="center">
+  <img src="docs/assets/logo.svg" width="110" height="110" alt="Prism Logo" />
+  <h1>Prism</h1>
+  <p><b>A multi-engine local AI CLI and OpenAI-compatible server for Linux and WSL2.</b></p>
+  <p>
+    <a href="https://pypi.org/project/prism-local/"><img src="https://img.shields.io/pypi/v/prism-local.svg" alt="PyPI" /></a>
+    <a href="https://github.com/senssei/prism-local/actions/workflows/ci.yml"><img src="https://github.com/senssei/prism-local/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
+    <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+" />
+    <img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status: alpha" />
+  </p>
+</div>
 
-[![PyPI](https://img.shields.io/pypi/v/prism-local.svg)](https://pypi.org/project/prism-local/)
-[![CI](https://github.com/senssei/prism-local/actions/workflows/ci.yml/badge.svg)](https://github.com/senssei/prism-local/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
-![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
-
-**A multi-engine local AI CLI and OpenAI-compatible server for Linux and WSL2.**
 Prism puts **ONNX Runtime GenAI** (CUDA or CPU) and **Ollama / llama.cpp** (GGUF) behind one command line, one
 `/v1/chat/completions` endpoint on a fixed port, and ready-made connectors for Cursor, Cline and MCP.
 

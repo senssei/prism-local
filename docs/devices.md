@@ -102,9 +102,24 @@ with the CUDA memory allocator settings that were tried (`arena_extend_strategy`
 Setting **`PRISM_PREFILL_CHUNK`** (a token count, e.g. `256`) makes ONNX Runtime GenAI process the prompt in chunks of that size, which
 bounded the growth in these measurements: at 4500 tokens, 6.6 GB with 256 (44% less than the default), 7.4 GB with 1024 and 7.7 to 8.7 GB
 with 512 (two runs). Decode speed (73 to 88 tok/s in every setting) and time to first token (about 1.0 s at 4500 tokens) stayed within a few
-percent. It is off by default because it is a measurement on one model and GPU: **check your model** before enabling it. For the longest
-prompt the first 48 greedy tokens differed from the unchunked run (shorter prompts were identical), which is expected from different
-numerics but means outputs are not guaranteed bit-identical.
+percent. It is off by default because the cost is not the same for every model: **check yours** before enabling it. For the longest prompt the
+first 48 greedy tokens differed from the unchunked run (shorter prompts were identical), which is expected from different numerics but
+means outputs are not guaranteed bit-identical.
+
+Other models measured the same way (same GPU, 4500-token prompt, chunk of 256; the two `generic-cpu` variants come from the Foundry Local cache
+and run on the CUDA provider under `--device auto`, slowly):
+
+| Model | Vocabulary | Peak memory, default | With chunk 256 | Time to first token, default | With chunk 256 |
+|---|---:|---:|---:|---:|---:|
+| Phi-4-mini (`cuda-gpu`, int4) | 200k | 11.7 GB | 6.6 GB (-44%) | 1.0 s | 1.1 s (+4%) |
+| qwen3-0.6b (`generic-cpu`) | 152k | 11.6 GB | 5.4 GB (-54%) | 7.7 s | 16.3 s (+110%) |
+| qwen2.5-coder-7b (`generic-cpu`) | 152k | 11.6 GB | 11.0 GB (-5%) | 15.3 s | 20.4 s (+33%) |
+
+Chunking lowered the peak for every model, but by very different amounts (the 7B model already filled the GPU after loading, 11.3 GB, so there
+was little room to save) and it cost anywhere from 4% to 110% more time to first token. The growth per prompt token by default was about 1.4 MB
+for Phi-4-mini and 1.5 MB for qwen3-0.6b, which fits a buffer that scales with vocabulary size times prompt length (both vocabularies are 150k to 200k)
+rather than with the KV cache; that is an inference from the pattern, not something verified in the library. Phi-3.5-mini did not finish the
+long prompt within five minutes.
 
 ## Verifying a GPU run
 

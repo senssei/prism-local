@@ -7,9 +7,15 @@ versions may include breaking changes).
 ## [Unreleased]
 
 ### Added
+- `stream_options.include_usage` on streaming requests: a last chunk with empty `choices`, `usage` and the `telemetry` block (device, timings). Streaming
+  responses carried neither before, so clients had to estimate token counts.
 - `PRISM_PREFILL_CHUNK` (a positive integer of tokens): process the prompt in chunks. ONNX Runtime GenAI's GPU memory otherwise grows by
   about 1.4 MB per prompt token and is not released; on Phi-4-mini with 4500 prompt tokens the peak fell from 11.7 GB to 6.6 GB with a
-  chunk of 256. Off by default; see [Devices & CUDA](https://senssei.github.io/prism-local/devices/#gpu-memory-and-long-prompts).
+  chunk of 256; on two other models the peak fell by 54% and 5% while time to first token rose by 110% and 33%, so it stays off by default. See [Devices & CUDA](https://senssei.github.io/prism-local/devices/#gpu-memory-and-long-prompts).
+
+### Changed
+- `GET /v1/models` and `prism list` show the device a model will run on (`CPU` or `CUDA (GPU)`, following `--device` and the hardware) instead of what its
+  files were exported for; the latter is `exported_for` in the API. Under `--device auto` a `generic-cpu` model runs on CUDA when a GPU is present.
 
 ## [0.1.0] - 2026-09-19
 
