@@ -16,7 +16,15 @@ ENV_MODEL_DIRS = "PRISM_MODEL_DIRS"
 def default_model_dir() -> Path:
     """Destination for `prism pull`."""
     configured = _env_model_dirs()
-    return Path(configured[0]) if configured else Path.home() / ".prism" / "models"
+    return Path(configured[0]) if configured else state_dir() / "models"
+
+
+def state_dir() -> Path:
+    """Directory where runtime state and locks are kept: ~/.prism (or $PRISM_STATE_DIR)."""
+    override = os.environ.get("PRISM_STATE_DIR")
+    if override:
+        return Path(os.path.expanduser(override))
+    return Path.home() / ".prism"
 
 
 def model_search_paths() -> List[str]:

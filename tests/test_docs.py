@@ -48,8 +48,20 @@ class TestDocsCoverage(unittest.TestCase):
 
     def test_every_env_var_is_documented(self):
         text = (DOCS / "getting-started.md").read_text()
-        for var in ("PRISM_MODEL_DIRS", "PRISM_DEVICE", "PRISM_API_KEY", "PRISM_BASE_URL", "PRISM_PYTHON"):
-            self.assertIn(var, text)
+        for var in ("PRISM_MODEL_DIRS", "PRISM_DEVICE", "PRISM_API_KEY", "PRISM_BASE_URL", "PRISM_PYTHON",
+                    "PRISM_RAM_RESERVE_MB", "PRISM_VRAM_RESERVE_MB", "PRISM_RESOURCE_CHECK",
+                    "PRISM_LOAD_TIMEOUT", "PRISM_LOAD_LOCK", "PRISM_MAX_QUEUE", "PRISM_STATE_DIR"):
+            self.assertIn(var, text, f"{var} is missing from docs/getting-started.md")
+
+    def test_503_and_queue_documented_in_api(self):
+        text = (DOCS / "api.md").read_text()
+        self.assertIn("insufficient_resources", text)
+        self.assertIn("--max-queue", text)
+
+    def test_parallel_use_documented_in_devices(self):
+        text = (DOCS / "devices.md").read_text()
+        self.assertIn("Parallel use", text)
+        self.assertIn(".wslconfig", text)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from prism import PRISM_BANNER
 from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from prism.engine import Engine, OnnxGenAiEngine
 from prism.ollama_bridge import embed_ollama, stream_ollama_chat
+from prism.resources import InsufficientResourcesError
 from prism.telemetry import get_gpu_info
 from prism.templates import flatten_content, render_prompt, supports_tools
 from prism.tools import arguments_as_objects, parse_tool_calls, to_openai_tool_calls
@@ -34,6 +35,7 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 DEFAULT_QUEUE_TIMEOUT_SEC = 300.0
+DEFAULT_MAX_QUEUE = 8
 
 
 def default_queue_timeout() -> Optional[float]:
@@ -47,6 +49,20 @@ def default_queue_timeout() -> Optional[float]:
         value = -1.0
     if value < 0:
         raise ValueError(f"PRISM_QUEUE_TIMEOUT must be a number of seconds >= 0 (got '{raw}')")
+    return value or None
+
+
+def default_max_queue() -> Optional[int]:
+    """Maximum requests that may wait for the engine: $PRISM_MAX_QUEUE (`0` = unlimited), default 8."""
+    raw = os.environ.get("PRISM_MAX_QUEUE", "").strip()
+    if not raw:
+        return DEFAULT_MAX_QUEUE
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise ValueError(f"PRISM_MAX_QUEUE must be an integer >= 0 (got '{raw}')")
     return value or None
 
 
@@ -67,18 +83,32 @@ class ActiveEngineManager:
         catalog: Optional[ModelCatalog] = None,
         engine_factory: Callable[[str], Engine] = OnnxGenAiEngine,
         queue_timeout: Optional[float] = None,
+        max_queue: Optional[int] = None,
     ):
         self.catalog = catalog or ModelCatalog()
         self.engine_factory = engine_factory
         self.queue_timeout = queue_timeout
+        self.max_queue = max_queue
         self.current_model_id: Optional[str] = None
         self.engine: Optional[Engine] = None
         self.lock = threading.Lock()
+        self.queue_lock = threading.Lock()
+        self.waiting_count = 0
 
     @contextlib.contextmanager
     def use_engine(self, resolved: Dict[str, Any]) -> Iterator[Engine]:
         """Holds the lock for the duration of the block and yields a loaded engine."""
-        if not self.lock.acquire(timeout=self.queue_timeout if self.queue_timeout else -1):
+        with self.queue_lock:
+            if self.max_queue is not None and self.max_queue > 0 and self.waiting_count >= self.max_queue:
+                raise EngineBusyError(f"request queue full (max {self.max_queue} waiting requests)")
+            self.waiting_count += 1
+        acquired = False
+        try:
+            acquired = self.lock.acquire(timeout=self.queue_timeout if self.queue_timeout else -1)
+        finally:
+            with self.queue_lock:
+                self.waiting_count -= 1
+        if not acquired:
             raise EngineBusyError(f"the model has been busy with other requests for more than {self.queue_timeout:g} s")
         try:
             if self.engine is None or self.current_model_id != resolved["id"]:
@@ -627,6 +657,8 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             engine = stack.enter_context(self.manager.use_engine(resolved))
         except EngineBusyError as ex:
             raise ApiError(503, f"Server busy: {ex}", "server_error", "server_busy", {"Retry-After": "30"})
+        except InsufficientResourcesError as ex:
+            raise ApiError(503, f"Insufficient resources to load model '{model_id}': {ex}", "server_error", "insufficient_resources", {"Retry-After": "30"})
         except Exception as ex:
             logger.exception("failed to load model %s", resolved.get("id"))
             raise ApiError(500, f"Failed to load model '{model_id}': {ex}", "server_error", "model_load_failed")
@@ -787,10 +819,12 @@ def start_server(
     api_key: Optional[str] = None,
     cors_origins: Sequence[str] = (),
     queue_timeout: Optional[float] = None,
+    max_queue: Optional[int] = None,
 ):
     """Launches the multi-threaded OpenAI REST server. `queue_timeout`: seconds a request may wait for the engine (None: forever)."""
     server = create_server(port=port, host=host, api_key=api_key, cors_origins=cors_origins)
     server.manager.queue_timeout = queue_timeout
+    server.manager.max_queue = max_queue
     with server:
         print(f"\n{PRISM_BANNER}\n")
         print(f"🚀 prism OpenAI Server active at http://{host}:{server.server_address[1]}/v1")

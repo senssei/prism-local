@@ -126,6 +126,13 @@ class TestErrors(ServerTestBase):
         resp, data = self.chat()
         self.assertError(resp, data, 500, "model_load_failed")
 
+    def test_insufficient_resources_is_json_503(self):
+        from prism.resources import InsufficientResourcesError
+        with patch.object(self.manager, "use_engine", side_effect=InsufficientResourcesError("RAM shortage")):
+            resp, data = self.chat()
+            self.assertError(resp, data, 503, "insufficient_resources")
+            self.assertEqual(resp.getheader("Retry-After"), "30")
+
     def test_unknown_route_is_json_404(self):
         resp, data = self.request("GET", "/nope")
         self.assertError(resp, data, 404, "not_found")
@@ -489,6 +496,28 @@ class TestQueueTimeout(ServerTestBase):
             th.join(10)
         self.assertEqual(results, [200, 200, 200])
         self.assertEqual(FakeEngine.max_active, 1)
+
+    def test_max_queue_overflow_gets_503_immediately(self):
+        self.manager.max_queue = 1
+        self.manager.queue_timeout = 5.0
+        FakeEngine.delay = 0.3
+        t1 = threading.Thread(target=lambda: self.chat())
+        t1.start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not FakeEngine.active:
+            time.sleep(0.01)
+
+        t2 = threading.Thread(target=lambda: self.chat())
+        t2.start()
+        time.sleep(0.05)
+
+        t0 = time.monotonic()
+        resp, data = self.chat()
+        elapsed = time.monotonic() - t0
+        self.assertEqual((resp.status, data["error"]["code"]), (503, "server_busy"))
+        self.assertLess(elapsed, 1.5)
+        t1.join(5)
+        t2.join(5)
 
 
 TOOL_TEMPLATE = ("{% if tools %}TOOLS:{% for t in tools %}{{ t.function.name }};{% endfor %}\n{% endif %}"

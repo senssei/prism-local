@@ -1,3 +1,4 @@
+import contextlib
 import os
 import shutil
 import tempfile
@@ -38,10 +39,16 @@ class TestOnnxGenAiEngine(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def make(self, gpu=True, device=None, **og_kwargs):
+    def make(self, gpu=True, device=None, check_can_load=None, machine_load_lock=None, **og_kwargs):
         fake = FakeOg(**og_kwargs)
-        for target, value in (("og", fake), ("OG_AVAILABLE", True),
-                              ("get_gpu_info", lambda: {"available": gpu})):
+        targets = [
+            ("og", fake),
+            ("OG_AVAILABLE", True),
+            ("get_gpu_info", lambda: {"available": gpu}),
+            ("check_can_load", check_can_load if check_can_load is not None else (lambda path, device="auto": None)),
+            ("machine_load_lock", machine_load_lock if machine_load_lock is not None else (lambda name=None, timeout=None: contextlib.nullcontext())),
+        ]
+        for target, value in targets:
             p = patch.object(engine_mod, target, value)
             p.start()
             self.addCleanup(p.stop)
@@ -52,6 +59,31 @@ class TestOnnxGenAiEngine(unittest.TestCase):
         out = list(engine.stream_generate("one two three", max_tokens=3))
         self.assertEqual([t for t, _, _ in out], ["t1 ", "t2 ", "t3 "])
         self.assertEqual([first for _, first, _ in out], [True, False, False])
+
+    def test_load_model_checks_resources_and_locks(self):
+        from unittest.mock import MagicMock
+        mock_lock = MagicMock(return_value=contextlib.nullcontext())
+        mock_check = MagicMock()
+        engine, _ = self.make(check_can_load=mock_check, machine_load_lock=mock_lock)
+        mock_lock.assert_called()
+        mock_check.assert_called_once()
+
+    def test_load_model_refusal_never_calls_og_model(self):
+        from unittest.mock import MagicMock
+        from prism.resources import InsufficientResourcesError
+        mock_check = MagicMock(side_effect=InsufficientResourcesError("No RAM"))
+        with self.assertRaises(InsufficientResourcesError):
+            self.make(check_can_load=mock_check)
+
+    def test_load_model_logs_vram_and_ram_delta(self):
+        with self.assertLogs("prism.engine", level="INFO") as cm:
+            with patch("prism.engine.ram_available_mb", side_effect=[8000.0, 7500.0]), \
+                 patch("prism.engine.vram_free_mb", side_effect=[6000.0, 4000.0]):
+                self.make(gpu=True, device="cuda")
+        joined = "\n".join(cm.output)
+        self.assertIn("Loaded", joined)
+        self.assertIn("VRAM +2000 MB", joined)
+        self.assertIn("RAM +500 MB", joined)
 
     def write_config(self, **model):
         import json
@@ -266,7 +298,9 @@ class TestOnnxGenAiEngine(unittest.TestCase):
     def test_old_onnxruntime_genai_without_config_reports_default(self):
         fake = FakeOg()
         del fake.Config
-        for target, value in (("og", fake), ("OG_AVAILABLE", True), ("get_gpu_info", lambda: {"available": True})):
+        for target, value in (("og", fake), ("OG_AVAILABLE", True), ("get_gpu_info", lambda: {"available": True}),
+                              ("check_can_load", lambda path, device="auto": None),
+                              ("machine_load_lock", lambda name=None, timeout=None: contextlib.nullcontext())):
             p = patch.object(engine_mod, target, value)
             p.start()
             self.addCleanup(p.stop)
@@ -302,7 +336,10 @@ class TestLoopGuard(unittest.TestCase):
 
     def make(self, **og_kwargs):
         fake = FakeOg(**og_kwargs)
-        for target, value in (("og", fake), ("OG_AVAILABLE", True), ("get_gpu_info", lambda: {"available": False})):
+        for target, value in (("og", fake), ("OG_AVAILABLE", True),
+                              ("get_gpu_info", lambda: {"available": False}),
+                              ("check_can_load", lambda path, device="auto": None),
+                              ("machine_load_lock", lambda name=None, timeout=None: contextlib.nullcontext())):
             p = patch.object(engine_mod, target, value)
             p.start()
             self.addCleanup(p.stop)

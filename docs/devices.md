@@ -135,3 +135,28 @@ prism benchmark phi-4-mini
 Look for `Execution provider: CUDA` and a VRAM increase on the order of the model size. On the reference machine a CUDA run added about 4.5 GB
 of VRAM and decoded at 79–98 tok/s. A model that "ran on GPU" but added almost no VRAM and decoded at single-digit tokens per
 second was running on the CPU.
+
+## Parallel use
+
+Running multiple inference processes or concurrent model loads on the same machine can exhaust host RAM or GPU VRAM,
+potentially locking the operating system or crashing background tasks. Prism guards against parallel thrashing at several levels:
+
+1. **Cross-process model load lock**: `prism.machine_lock` uses an OS-level file lock (`~/.prism/load.lock`) to serialize model loading
+   across all local Prism commands (`run`, `chat`, `serve`, `benchmark`, `mcp`). If another process is currently loading a model, a second process
+   waits up to `PRISM_LOAD_TIMEOUT` (default 120 s) instead of loading concurrently.
+2. **Resource capacity guard**: Before loading an ONNX model, Prism checks live available RAM (`/proc/meminfo`) and free VRAM
+   (NVML) against the model weight size and prefill headroom (`PRISM_PREFILL_CHUNK` × 1.4 MB/token), keeping safety reserves
+   (`PRISM_RAM_RESERVE_MB`, default 2048 MB; `PRISM_VRAM_RESERVE_MB`, default 1536 MB). If headroom is insufficient, the load is refused
+   immediately with `InsufficientResourcesError` (HTTP `503 insufficient_resources`). Disable with `PRISM_RESOURCE_CHECK=off`.
+3. **Queue limits**: `prism serve` limits waiting requests for the active model with `--max-queue` / `$PRISM_MAX_QUEUE` (default 8). When
+   full, additional requests fail immediately with `503 server_busy` rather than piling up indefinitely.
+4. **WSL2 host memory bounding**: Under WSL2, Linux memory allocations may consume Windows host RAM without bounds unless configured.
+   Create or edit `%USERPROFILE%\.wslconfig` (typically `C:\Users\<Username>\.wslconfig`) with:
+
+```ini
+[wsl2]
+memory=16GB
+autoMemoryReclaim=gradual
+```
+
+`prism doctor` inspects `.wslconfig` and reports whether these safety limits are active. Prism never modifies `.wslconfig`.

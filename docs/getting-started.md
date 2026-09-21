@@ -61,6 +61,13 @@ actually loads**, and whether Ollama is reachable. Fix anything marked ❌ befor
 | `OLLAMA_HOST` | Ollama daemon address (`host`, `host:port` or a URL), as in Ollama itself | `http://localhost:11434` |
 | `PRISM_BASE_URL` | Server URL used by `prism mcp` | `http://localhost:5272/v1` |
 | `PRISM_QUEUE_TIMEOUT` | Seconds a request may wait for the model before `503` (`0` = forever); same as `prism serve --queue-timeout` | `300` |
+| `PRISM_MAX_QUEUE` | Maximum requests allowed to wait for the engine before immediate `503 server_busy` (`0` = unlimited); same as `prism serve --max-queue` | `8` |
+| `PRISM_RAM_RESERVE_MB` | Host RAM in MB kept free when checking if a model can safely load | `2048` |
+| `PRISM_VRAM_RESERVE_MB` | GPU VRAM in MB kept free when checking if a CUDA model can safely load | `1536` |
+| `PRISM_RESOURCE_CHECK` | `off` or `0` disables the pre-load RAM and VRAM capacity guard | on |
+| `PRISM_LOAD_LOCK` | `off` or `0` disables cross-process model load serialization (`load.lock`) | on |
+| `PRISM_LOAD_TIMEOUT` | Seconds a process waits for the cross-process model load lock before failing | `120` |
+| `PRISM_STATE_DIR` | Directory for state and runtime locks (`load.lock`) | `~/.prism` |
 | `PRISM_PYTHON` | Interpreter used by `bin/prism` | see above |
 
 Models are searched in `$PRISM_MODEL_DIRS`, then `~/.prism/models`, then the Foundry Local cache

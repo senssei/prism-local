@@ -130,13 +130,14 @@ All errors are JSON: `{"error": {"message", "type", "param", "code"}}`.
 | 403 | `host_not_allowed` | Non-loopback `Host` header on a loopback bind |
 | 404 | `model_not_found` / `not_found` | Unknown model / unknown route |
 | 413 | `body_too_large` | Body over 10 MB |
-| 503 | `server_busy` | The model stayed busy with other requests longer than `--queue-timeout`; carries `Retry-After: 30` |
+| 503 | `insufficient_resources` | Host RAM or GPU VRAM is insufficient to load the model safely; carries `Retry-After: 30` |
+| 503 | `server_busy` | The model stayed busy with other requests longer than `--queue-timeout`, or waiting queue exceeded `--max-queue` (default 8); carries `Retry-After: 30` |
 | 500 | `model_load_failed` | The ONNX model could not be loaded, for example `--device cuda` with a broken CUDA setup |
 | 502 | `backend_unavailable` | Ollama is unreachable or failed |
 
 ## Concurrency
 
-One ONNX model is resident at a time, and generation is **serialized behind a lock**: concurrent requests queue, for at most `--queue-timeout` seconds (default 300), after which they get `503`. Requesting a
+One ONNX model is resident at a time, and generation is **serialized behind a lock**: concurrent requests queue, for at most `--queue-timeout` seconds (default 300), after which they get `503 server_busy`. If the number of waiting requests exceeds `--max-queue` (default 8), new requests get `503 server_busy` immediately. If available memory is below safety thresholds, loading is refused with `503 insufficient_resources`. Requesting a
 different ONNX model unloads the current one and loads the new one, which takes seconds. Ollama requests are not serialized by
 Prism.
 

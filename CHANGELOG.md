@@ -14,6 +14,11 @@ versions may include breaking changes).
   request was greedy (Phi-4-mini at temperature 1.5: 1 distinct output in 4 runs before, 4 in 4 now). When sampling, `top_k` is the model's own value if above 1, else 40.
 
 ### Added
+- Diagnostics and telemetry: `prism status` displays system RAM and swap usage; model loads log memory deltas ("VRAM +N MB, RAM +N MB"); `prism doctor` inspects Windows WSL2 `.wslconfig` and warns if `memory=` or `autoMemoryReclaim=gradual` are missing.
+- Request queue limit: `--max-queue` CLI flag and `$PRISM_MAX_QUEUE` (default 8) to bound waiting requests for active ONNX model, immediately returning 503 `server_busy` when full.
+- Guarded ONNX model loading: `OnnxGenAiEngine._load_model` acquires the machine lock and checks memory headroom before allocating library resources. Returns HTTP 503 `insufficient_resources` (`Retry-After: 30`) on `/v1/chat/completions` and provides actionable hints in MCP tool completions.
+- Cross-process model load lock: `prism.machine_lock` module with `flock` on `~/.prism/load.lock` (via `state_dir()` in `prism.paths`) to serialize model loading across processes and prevent concurrent VRAM spikes (timeout configurable via `PRISM_LOAD_TIMEOUT`, `PRISM_LOAD_LOCK=off`).
+- Resource budget and capacity guard: `prism.resources` module with `ram_available_mb()`, `vram_free_mb()`, `estimate_load_mb()`, and `check_can_load()` to guard against VRAM and RAM exhaustion before loading models (configurable via `PRISM_RAM_RESERVE_MB`, `PRISM_VRAM_RESERVE_MB`, `PRISM_RESOURCE_CHECK=off`).
 - AI-native SDLC for coding agents (Claude Code, Codex, Cursor, ...): `intent.md`, `spec.md`, `plan.md` and `REVIEW.md` as committed artifacts, `AGENTS.md`, `sdlc*` skills in `.agents/skills/`, `scripts/sdlc_check.py` (gate, and `--red` to prove a new test fails first), an opt-in `.githooks/pre-commit`, and a CI changelog check on pull requests. See `docs/sdlc.md`.
 - `top_k` and `repetition_penalty` request fields (ONNX and Ollama); `frequency_penalty` / `presence_penalty` go to Ollama, and on ONNX a non-zero value is a `400`
   `unsupported_parameter` instead of being silently ignored.

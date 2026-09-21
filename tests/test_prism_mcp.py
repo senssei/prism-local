@@ -39,6 +39,15 @@ class TestPrismMcp(unittest.TestCase):
         self.assertIsInstance(output, str)
         self.assertIn("PRISM SYSTEM & HARDWARE TELEMETRY", output)
 
+    def test_handle_tool_call_insufficient_resources_hint(self):
+        import io
+        err_body = io.BytesIO(b'{"error":{"message":"RAM shortage","code":"insufficient_resources"}}')
+        http_err = urllib.error.HTTPError("http://localhost:5272/v1/chat/completions", 503, "Server Error", {}, err_body)
+        with patch("urllib.request.urlopen", side_effect=http_err):
+            output = handle_tool_call("prism_ask_coder", {"task": "test", "model": "qwen"})
+            self.assertIn("Hint:", output)
+            self.assertIn("PRISM_RESOURCE_CHECK=off", output)
+
 class TestServerlessFallback(unittest.TestCase):
     """With no `prism serve` reachable, tool calls run the model in this process; it must be loaded once, not once per call."""
 
@@ -85,6 +94,26 @@ class TestServerlessFallback(unittest.TestCase):
         self.assertIsNotNone(mcp._manager.engine)
         mcp._manager.unload()
         self.assertIsNone(mcp._manager.engine)
+
+
+class TestMcpErrorHints(unittest.TestCase):
+    def test_503_server_busy_does_not_suggest_resource_check(self):
+        import io
+        fp = io.BytesIO(b'{"error": {"message": "Server busy", "code": "server_busy"}}')
+        err = urllib.error.HTTPError("http://localhost:5272/v1", 503, "Server busy", {}, fp)
+        with patch("urllib.request.urlopen", side_effect=err):
+            out = mcp.call_prism_server("phi-4-mini", [{"role": "user", "content": "hi"}], {})
+            self.assertIn("Server busy", out)
+            self.assertNotIn("PRISM_RESOURCE_CHECK", out)
+
+    def test_503_insufficient_resources_suggests_resource_check(self):
+        import io
+        fp = io.BytesIO(b'{"error": {"message": "Insufficient RAM", "code": "insufficient_resources"}}')
+        err = urllib.error.HTTPError("http://localhost:5272/v1", 503, "Insufficient resources", {}, fp)
+        with patch("urllib.request.urlopen", side_effect=err):
+            out = mcp.call_prism_server("phi-4-mini", [{"role": "user", "content": "hi"}], {})
+            self.assertIn("Insufficient RAM", out)
+            self.assertIn("PRISM_RESOURCE_CHECK=off", out)
 
 
 if __name__ == "__main__":

@@ -12,9 +12,10 @@ from prism import PRISM_BANNER
 from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from prism.chat import run_interactive_chat
 from prism.benchmark import run_benchmark
-from prism.server import default_queue_timeout, start_server
+from prism.server import default_max_queue, default_queue_timeout, start_server
 from prism.telemetry import get_gpu_info, bootstrap_cuda_env, probe_cuda_provider
 from prism.engine import ModelLoadError, OnnxGenAiEngine, OG_AVAILABLE
+from prism.resources import inspect_wslconfig, system_memory_info
 from prism.templates import render_prompt
 from prism.ollama_bridge import is_ollama_running, stream_ollama_chat
 from prism.convert import missing_dependencies, convert_model
@@ -33,6 +34,14 @@ def cmd_status(args):
             print(f"   • VRAM: {dev['vram_used_mb']:.1f} MB used / {dev['vram_total_mb']:.1f} MB total ({dev['vram_free_mb']:.1f} MB free)")
     else:
         print(f"❌ GPU: {gpu.get('error', 'Not detected via NVML')}")
+
+    mem = system_memory_info()
+    if mem.get("ram_total_mb", 0) > 0:
+        print(f"• System RAM:                   {mem['ram_used_mb']:.1f} MB used / {mem['ram_total_mb']:.1f} MB total ({mem['ram_available_mb']:.1f} MB available)")
+    if mem.get("swap_total_mb", 0) > 0:
+        print(f"• System Swap:                  {mem['swap_used_mb']:.1f} MB used / {mem['swap_total_mb']:.1f} MB total ({mem['swap_free_mb']:.1f} MB free)")
+    else:
+        print("• System Swap:                  none configured")
 
     print(f"• ONNX Runtime GenAI Available: {OG_AVAILABLE}")
     print(f"• Ollama Daemon Available:      {is_ollama_running()}")
@@ -77,6 +86,23 @@ def cmd_doctor(args):
         print("✅ Model builder: All requirements installed (prism convert).")
     else:
         print(f'ℹ️ Model builder: Missing {", ".join(missing)} (optional, for prism convert: pip install "prism-local[convert]")')
+
+    wsl_cfg = inspect_wslconfig()
+    if wsl_cfg.get("is_wsl"):
+        if not wsl_cfg.get("found"):
+            print("⚠️  WSL configuration: no .wslconfig found on Windows host.")
+            print("   • Without %USERPROFILE%\\.wslconfig, WSL2 has no host RAM limit and gradual memory reclaim is off.")
+            print("   • Recommended: create %USERPROFILE%\\.wslconfig with [wsl2] memory=<limit> and autoMemoryReclaim=gradual.")
+        elif wsl_cfg["has_memory"] and wsl_cfg["has_reclaim"]:
+            print(f"✅ WSL configuration: memory limit and autoMemoryReclaim configured ({wsl_cfg['path']}).")
+        else:
+            print(f"⚠️  WSL configuration ({wsl_cfg['path']}):")
+            if not wsl_cfg["has_memory"]:
+                print("   • Missing 'memory=' limit under [wsl2]: WSL may consume excessive host RAM.")
+            if not wsl_cfg["has_reclaim"]:
+                print("   • Missing 'autoMemoryReclaim=gradual' under [wsl2]: cached memory is not released to Windows.")
+            print("   Prism never modifies .wslconfig; add these settings manually to prevent system lockups.")
+
     print("=" * 65)
 
 
@@ -165,12 +191,16 @@ def cmd_chat(args):
 
 
 def cmd_serve(args):
+    max_queue = args.max_queue if args.max_queue is not None else default_max_queue()
+    if max_queue == 0:
+        max_queue = None
     start_server(
         port=args.port,
         host=args.host,
         api_key=args.api_key or os.environ.get("PRISM_API_KEY") or None,
         cors_origins=args.cors_origin,
         queue_timeout=args.queue_timeout if args.queue_timeout is not None else default_queue_timeout(),
+        max_queue=max_queue,
     )
 
 
@@ -281,6 +311,8 @@ def main():
     p_serve.add_argument("--cors-origin", action="append", default=[], metavar="ORIGIN", help="Allow a browser origin (repeatable, or '*'); CORS is off by default")
     p_serve.add_argument("--queue-timeout", type=float, default=None, metavar="SEC",
                          help="Seconds a request may wait for the model before it gets 503 (0: wait forever; default: $PRISM_QUEUE_TIMEOUT, else 300)")
+    p_serve.add_argument("--max-queue", type=int, default=None, metavar="N",
+                         help="Maximum requests waiting for the engine before 503 is returned (0: unlimited; default: $PRISM_MAX_QUEUE, else 8)")
     p_serve.set_defaults(func=cmd_serve)
 
     # benchmark

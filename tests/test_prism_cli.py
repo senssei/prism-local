@@ -16,7 +16,7 @@ def run_cli(*argv, env=None):
     """Runs prism.cli.main() and returns (exit_code, stdout)."""
     out = io.StringIO()
     code = 0
-    env = {"PRISM_API_KEY": "", **(env or {})}
+    env = {"PRISM_API_KEY": "", "PRISM_QUEUE_TIMEOUT": "", "PRISM_MAX_QUEUE": "", **(env or {})}
     with patch.object(sys, "argv", ["prism", *argv]), patch.dict(os.environ, env), \
             contextlib.redirect_stdout(out):
         try:
@@ -30,14 +30,15 @@ class TestServeArgs(unittest.TestCase):
     def test_defaults_are_loopback_no_auth_no_cors(self):
         with patch.object(cli, "start_server") as start:
             run_cli("serve")
-        start.assert_called_once_with(port=5272, host="127.0.0.1", api_key=None, cors_origins=[], queue_timeout=300.0)
+        start.assert_called_once_with(port=5272, host="127.0.0.1", api_key=None, cors_origins=[],
+                                      queue_timeout=300.0, max_queue=8)
 
     def test_flags(self):
         with patch.object(cli, "start_server") as start:
             run_cli("serve", "--port", "6000", "--host", "0.0.0.0", "--api-key", "k",
                     "--cors-origin", "http://a", "--cors-origin", "http://b")
         start.assert_called_once_with(port=6000, host="0.0.0.0", api_key="k",
-                                      cors_origins=["http://a", "http://b"], queue_timeout=300.0)
+                                      cors_origins=["http://a", "http://b"], queue_timeout=300.0, max_queue=8)
 
     def test_queue_timeout_flag_and_environment(self):
         with patch.object(cli, "start_server") as start:
@@ -49,6 +50,19 @@ class TestServeArgs(unittest.TestCase):
             self.assertIsNone(start.call_args.kwargs["queue_timeout"])
             run_cli("serve", "--queue-timeout", "7", env={"PRISM_QUEUE_TIMEOUT": "12"})  # the flag wins
             self.assertEqual(start.call_args.kwargs["queue_timeout"], 7.0)
+
+    def test_max_queue_flag_and_environment(self):
+        with patch.object(cli, "start_server") as start:
+            run_cli("serve", "--max-queue", "4")
+            self.assertEqual(start.call_args.kwargs["max_queue"], 4)
+            run_cli("serve", env={"PRISM_MAX_QUEUE": "16"})
+            self.assertEqual(start.call_args.kwargs["max_queue"], 16)
+            run_cli("serve", env={"PRISM_MAX_QUEUE": "0"})  # 0 means unlimited
+            self.assertIsNone(start.call_args.kwargs["max_queue"])
+            run_cli("serve", "--max-queue", "2", env={"PRISM_MAX_QUEUE": "16"})  # the flag wins
+            self.assertEqual(start.call_args.kwargs["max_queue"], 2)
+            run_cli("serve", "--max-queue", "0")  # 0 flag means unlimited
+            self.assertIsNone(start.call_args.kwargs["max_queue"])
 
     def test_api_key_from_environment(self):
         with patch.object(cli, "start_server") as start:
@@ -141,6 +155,57 @@ class TestModelCommands(unittest.TestCase):
             code, out = run_cli("convert", "org/model")
         self.assertEqual(code, 1)
         self.assertIn("failed", out)
+
+
+class TestStatusCommand(unittest.TestCase):
+    def test_status_displays_ram_and_swap(self):
+        fake_mem = {
+            "ram_total_mb": 16384.0,
+            "ram_available_mb": 12288.0,
+            "ram_used_mb": 4096.0,
+            "swap_total_mb": 8192.0,
+            "swap_free_mb": 6144.0,
+            "swap_used_mb": 2048.0,
+        }
+        with patch("prism.cli.system_memory_info", return_value=fake_mem):
+            code, out = run_cli("status")
+        self.assertEqual(code, 0)
+        self.assertIn("System RAM:", out)
+        self.assertIn("4096.0 MB used / 16384.0 MB total", out)
+        self.assertIn("System Swap:", out)
+        self.assertIn("2048.0 MB used / 8192.0 MB total", out)
+
+
+class TestDoctorWslconfig(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_doctor_warns_when_wslconfig_missing_settings(self):
+        cfg_path = os.path.join(self.tmp, ".wslconfig")
+        with open(cfg_path, "w") as f:
+            f.write("[wsl2]\nvmIdleTimeout=-1\n")
+        code, out = run_cli("doctor", env={"PRISM_WSLCONFIG_PATH": cfg_path})
+        self.assertEqual(code, 0)
+        self.assertIn("WSL configuration", out)
+        self.assertIn("Missing 'memory='", out)
+        self.assertIn("Missing 'autoMemoryReclaim=gradual'", out)
+
+    def test_doctor_reports_ok_when_wslconfig_has_settings(self):
+        cfg_path = os.path.join(self.tmp, ".wslconfig")
+        with open(cfg_path, "w") as f:
+            f.write("[wsl2]\nmemory=16GB\nautoMemoryReclaim=gradual\n")
+        code, out = run_cli("doctor", env={"PRISM_WSLCONFIG_PATH": cfg_path})
+        self.assertEqual(code, 0)
+        self.assertIn("WSL configuration", out)
+        self.assertIn("memory limit and autoMemoryReclaim configured", out)
+
+    def test_doctor_warns_when_wslconfig_missing_entirely_under_wsl(self):
+        with patch("prism.cli.inspect_wslconfig", return_value={"is_wsl": True, "found": False, "path": None}):
+            code, out = run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("WSL configuration", out)
+        self.assertIn("no .wslconfig found", out)
 
 
 if __name__ == "__main__":

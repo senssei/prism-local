@@ -125,7 +125,10 @@ def call_prism_server(
             return f"{reply}{telemetry}"
     except urllib.error.HTTPError as http_ex:
         detail = http_ex.read().decode("utf-8", "replace")[:300]
-        return f"Error: Prism server responded {http_ex.code}: {detail}"
+        hint = ""
+        if "insufficient_resources" in detail:
+            hint = "\nHint: Model load was refused due to resource limits. Override with PRISM_RESOURCE_CHECK=off or adjust memory reserves."
+        return f"Error: Prism server responded {http_ex.code}: {detail}{hint}"
     except urllib.error.URLError:
         # Fallback to direct engine generation if server is offline
         try:
@@ -146,7 +149,11 @@ def call_prism_server(
                 )
                 return f"{gen_res['text']}{telemetry}"
             except Exception as engine_ex:
-                return f"Error executing direct ONNX engine for model '{model}': {engine_ex}"
+                hint = ""
+                from prism.resources import InsufficientResourcesError
+                if isinstance(engine_ex, InsufficientResourcesError) or "insufficient_resources" in str(engine_ex).lower():
+                    hint = "\nHint: Model load refused due to resource limits. Override with PRISM_RESOURCE_CHECK=off."
+                return f"Error executing direct ONNX engine for model '{model}': {engine_ex}{hint}"
 
         return (
             f"Error: Could not connect to Prism inference server at {base_url}.\n"

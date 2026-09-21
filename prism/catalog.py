@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from prism.engine import default_device
 from prism.paths import default_model_dir, model_search_paths
 from prism.ollama_bridge import list_ollama_models, pull_ollama_model
+from prism.resources import dir_size_mb
 from prism.telemetry import get_gpu_info
 from prism.templates import resolve_template
 
@@ -164,8 +165,7 @@ def verify_model_dir(path: Path, ep: str, title: str = "MODEL DOWNLOAD VERIFICAT
     (genai_config.json plus *.onnx weights). Shared by `prism pull` and `prism convert`."""
     has_config = (path / "genai_config.json").exists()
     has_weights = any(path.glob("*.onnx")) or any(path.glob("*.onnx.data"))
-    size_bytes = sum(f.stat().st_size for f in path.glob("*") if f.is_file())
-    size_mb = round(size_bytes / (1024 * 1024), 1)
+    size_mb = dir_size_mb(path)
 
     print("\n" + "=" * 60)
     print(f" 📦 {title}")
@@ -225,7 +225,7 @@ class ModelCatalog:
                     if name.startswith("v") and name[1:].isdigit():
                         name = f"{model_dir.parent.name}:{name}"
 
-                    size_bytes = sum(f.stat().st_size for f in model_dir.glob("*") if f.is_file())
+                    size_mb = dir_size_mb(model_dir)
                     cfg_path = model_dir / "genai_config.json"
                     device = "CPU"
                     model_type = ""
@@ -242,6 +242,7 @@ class ModelCatalog:
                                 device = "CUDA (GPU)"
                         except Exception:
                             pass
+
                     if "cuda" in name.lower() or "gpu" in name.lower():
                         device = "CUDA (GPU)"
 
@@ -253,7 +254,7 @@ class ModelCatalog:
                             "engine": "ONNX Runtime GenAI",
                             "type": "ONNX Graph",
                             "device": device,
-                            "size_mb": round(size_bytes / (1024 * 1024), 1),
+                            "size_mb": size_mb,
                             "path": str(model_dir),
                             "backend": "onnx",
                             "template": template,

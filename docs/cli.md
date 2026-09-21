@@ -22,13 +22,13 @@ See [Devices & CUDA](devices.md).
 
 ## `prism status`
 
-GPU name, compute capability and VRAM (via NVML), whether `onnxruntime-genai` and Ollama are available, and the number of
+GPU name, compute capability and VRAM (via NVML), system RAM and swap usage (via `/proc/meminfo`), whether `onnxruntime-genai` and Ollama are available, and the number of
 discovered ONNX models.
 
 ## `prism doctor`
 
 Checks the NVML driver, `onnxruntime-genai`, whether ONNX Runtime's **CUDA provider can be loaded** (naming the missing
-library if not), and the Ollama daemon.
+library if not), the Ollama daemon, model conversion dependencies, and WSL2 host `.wslconfig` memory limits.
 
 ## `prism list`
 
@@ -107,6 +107,7 @@ Starts the [OpenAI-compatible server](api.md).
 | `--api-key KEY` | `$PRISM_API_KEY` | Require `Authorization: Bearer KEY` |
 | `--cors-origin ORIGIN` | none | Allow a browser origin (repeatable, or `*`); CORS is off by default |
 | `--queue-timeout SEC` | `$PRISM_QUEUE_TIMEOUT`, else `300` | How long a request may wait for the model before it gets `503 server_busy`; `0` waits forever |
+| `--max-queue N` | `$PRISM_MAX_QUEUE`, else `8` | Maximum waiting requests before immediate `503 server_busy`; `0` is unlimited |
 | `--device …` | `auto` | See above |
 
 ## `prism benchmark MODEL`

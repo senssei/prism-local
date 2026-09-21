@@ -34,6 +34,26 @@ class ModelLoadError(RuntimeError):
     """The model could not be loaded (bad files, or the requested execution provider is unavailable)."""
 
 
+def machine_load_lock(*args, **kwargs):
+    import prism.machine_lock as _ml
+    return _ml.machine_load_lock(*args, **kwargs)
+
+
+def check_can_load(*args, **kwargs):
+    import prism.resources as _res
+    return _res.check_can_load(*args, **kwargs)
+
+
+def ram_available_mb(*args, **kwargs):
+    import prism.resources as _res
+    return _res.ram_available_mb(*args, **kwargs)
+
+
+def vram_free_mb(*args, **kwargs):
+    import prism.resources as _res
+    return _res.vram_free_mb(*args, **kwargs)
+
+
 def default_device() -> str:
     """Requested execution provider: $PRISM_DEVICE (auto|cuda|cpu), default auto."""
     value = os.environ.get("PRISM_DEVICE", "auto").strip().lower() or "auto"
@@ -193,35 +213,56 @@ class OnnxGenAiEngine:
     def _load_model(self):
         """Initializes og.Model (on the requested execution provider) and og.Tokenizer."""
         want = self.requested_device
-        try:
-            if not hasattr(og, "Config"):  # older onnxruntime_genai cannot pick a provider
-                self._model = og.Model(self.model_path)
-            elif want == "cpu":
-                self._model, self.device = self._model_for("cpu"), "cpu"
-            elif want == "cuda":
-                try:
-                    self._model, self.device = self._model_for("cuda"), "cuda"
-                except Exception as ex:
-                    raise RuntimeError(
-                        f"CUDA execution provider unavailable: {ex}. Run 'prism doctor' to diagnose, "
-                        f"or use --device cpu / --device auto."
-                    )
-            else:  # auto
-                if get_gpu_info().get("available"):
+        if want == "auto":
+            target_device = "cuda" if get_gpu_info().get("available") else "cpu"
+        else:
+            target_device = want
+
+        model_name = Path(self.model_path).name
+        with machine_load_lock(model_name):
+            check_can_load(self.model_path, device=target_device)
+            ram_before = ram_available_mb()
+            vram_before = vram_free_mb()
+            try:
+                if not hasattr(og, "Config"):  # older onnxruntime_genai cannot pick a provider
+                    self._model = og.Model(self.model_path)
+                elif want == "cpu":
+                    self._model, self.device = self._model_for("cpu"), "cpu"
+                elif want == "cuda":
                     try:
                         self._model, self.device = self._model_for("cuda"), "cuda"
                     except Exception as ex:
-                        self.fallback_reason = f"CUDA execution provider failed to load: {ex}"
-                        logger.warning("%s; falling back to CPU (run 'prism doctor' to diagnose)", self.fallback_reason)
+                        raise RuntimeError(
+                            f"CUDA execution provider unavailable: {ex}. Run 'prism doctor' to diagnose, "
+                            f"or use --device cpu / --device auto."
+                        )
+                else:  # auto
+                    if get_gpu_info().get("available"):
+                        try:
+                            self._model, self.device = self._model_for("cuda"), "cuda"
+                        except Exception as ex:
+                            self.fallback_reason = f"CUDA execution provider failed to load: {ex}"
+                            logger.warning("%s; falling back to CPU (run 'prism doctor' to diagnose)", self.fallback_reason)
+                    else:
+                        self.fallback_reason = "no NVIDIA GPU detected"
+                    if self._model is None:
+                        self._model, self.device = self._model_for("cpu"), "cpu"
+                self._tokenizer = og.Tokenizer(self._model)
+                self._literal_tokens = self._find_stripped_markers()
+                ram_after = ram_available_mb()
+                vram_after = vram_free_mb()
+                ram_delta = max(0.0, ram_before - ram_after)
+                if vram_before is not None and vram_after is not None:
+                    vram_delta = max(0.0, vram_before - vram_after)
+                    logger.info("Loaded %s on %s (VRAM +%.0f MB, RAM +%.0f MB)", model_name, self.device, vram_delta, ram_delta)
                 else:
-                    self.fallback_reason = "no NVIDIA GPU detected"
-                if self._model is None:
-                    self._model, self.device = self._model_for("cpu"), "cpu"
-            self._tokenizer = og.Tokenizer(self._model)
-            self._literal_tokens = self._find_stripped_markers()
-        except Exception as ex:
-            self._model = self._tokenizer = None
-            raise ModelLoadError(f"Failed to load ONNX model at {self.model_path}: {ex}")
+                    logger.info("Loaded %s on %s (RAM +%.0f MB)", model_name, self.device, ram_delta)
+            except ModelLoadError:
+                self._model = self._tokenizer = None
+                raise
+            except Exception as ex:
+                self._model = self._tokenizer = None
+                raise ModelLoadError(f"Failed to load ONNX model at {self.model_path}: {ex}")
 
     def _find_stripped_markers(self) -> Dict[int, str]:
         """Of the tool-call marker tokens, those that ONNX Runtime GenAI's streaming decoder turns into empty text (it drops special
