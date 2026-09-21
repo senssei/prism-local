@@ -55,6 +55,16 @@ class ServerTestBase(unittest.TestCase):
         body = {"model": model, "messages": [{"role": "user", "content": "hi"}], **extra}
         return self.request("POST", "/v1/chat/completions", body)
 
+    def chat_body(self, **extra):
+        return {"model": "qwen-coder-gpu", "stream": True, "messages": [{"role": "user", "content": "hi there"}], **extra}
+
+    def stream(self, path, body):
+        resp, raw = self.request("POST", path, body, raw=True)
+        self.assertEqual(resp.status, 200)
+        events = [e[len("data: "):] for e in raw.decode().strip().split("\n\n")]
+        self.assertEqual(events[-1], "[DONE]")
+        return [json.loads(e) for e in events[:-1]]
+
 
 class TestChatCompletions(ServerTestBase):
     def test_non_stream_response_shape_and_usage(self):
@@ -95,6 +105,93 @@ class TestChatCompletions(ServerTestBase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(data["choices"][0]["text"], "Hello world")
         self.assertEqual(FakeEngine.prompts[-1], "hello")  # raw prompt, no template
+
+    def test_chat_completion_with_reasoning_non_streaming(self):
+        FakeEngine.pieces = ["<think>\n", "Step by step thinking\n", "</think>\n", "42"]
+        resp, data = self.chat()
+        self.assertEqual(resp.status, 200)
+        message = data["choices"][0]["message"]
+        self.assertEqual(message.get("reasoning_content"), "Step by step thinking")
+        self.assertEqual(message.get("content"), "42")
+
+    def test_chat_completion_with_reasoning_streaming(self):
+        FakeEngine.pieces = ["<think>\n", "thinking step 1\n", "</think>\n", "answer"]
+        chunks = self.stream("/v1/chat/completions", self.chat_body())
+        reasoning = "".join(c["choices"][0]["delta"].get("reasoning_content", "") for c in chunks if "delta" in c["choices"][0])
+        content = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks if "delta" in c["choices"][0])
+        self.assertIn("thinking step 1", reasoning)
+        self.assertEqual(content, "answer")
+        self.assertNotIn("<think>", reasoning)
+        self.assertNotIn("</think>", reasoning)
+
+    def test_chat_completion_unclosed_reasoning_non_streaming(self):
+        FakeEngine.pieces = ["<think>\n", "cut off thinking"]
+        resp, data = self.chat()
+        self.assertEqual(resp.status, 200)
+        message = data["choices"][0]["message"]
+        self.assertEqual(message.get("reasoning_content"), "cut off thinking")
+        self.assertEqual(message.get("content"), "")
+
+    def test_chat_completion_unclosed_reasoning_streaming(self):
+        # The model emitted <think> but `max_tokens` ended the stream before the closing tag. Per spec P7 the
+        # whole remaining buffer must surface as reasoning_content and content must stay empty; no `<think>`
+        # substring may leak into any delta.
+        FakeEngine.pieces = ["<think>", "still ", "thinking"]
+        chunks = self.stream("/v1/chat/completions", self.chat_body(max_tokens=3))
+        reasoning = "".join(
+            c["choices"][0]["delta"].get("reasoning_content", "")
+            for c in chunks if "delta" in c["choices"][0]
+        )
+        content = "".join(
+            c["choices"][0]["delta"].get("content", "")
+            for c in chunks if "delta" in c["choices"][0]
+        )
+        self.assertEqual(reasoning, "still thinking")
+        self.assertEqual(content, "")
+        for c in chunks:
+            for delta in (c["choices"][0].get("delta") or {},):
+                self.assertNotIn("<think>", delta.get("reasoning_content", ""))
+                self.assertNotIn("<think>", delta.get("content", ""))
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "length")
+
+    def test_chat_completion_empty_think_omits_reasoning_field(self):
+        # An empty `<think></think>` block must not surface as `reasoning_content: ""`; the key is omitted so the
+        # client cannot confuse "no reasoning" with "empty reasoning". Content must remain the answer text.
+        FakeEngine.pieces = ["<think></think>", "answer"]
+        resp, data = self.chat()
+        self.assertEqual(resp.status, 200)
+        message = data["choices"][0]["message"]
+        self.assertNotIn("reasoning_content", message)
+        self.assertEqual(message.get("content"), "answer")
+
+    def test_chat_completion_empty_think_omits_reasoning_field_streaming(self):
+        # Same wire shape for the streaming path: an empty think block does not produce any
+        # `delta: reasoning_content` chunk.
+        FakeEngine.pieces = ["<think></think>", "answer"]
+        chunks = self.stream("/v1/chat/completions", self.chat_body())
+        for c in chunks:
+            delta = c["choices"][0].get("delta") or {}
+            self.assertNotIn("reasoning_content", delta)
+        content = "".join(
+            c["choices"][0]["delta"].get("content", "")
+            for c in chunks if "delta" in c["choices"][0]
+        )
+        self.assertEqual(content, "answer")
+
+    def test_onnx_legacy_completions_leave_think_tags_intact(self):
+        # The reasoning extractor only runs on /v1/chat/completions (chat=True). On /v1/completions the
+        # caller owns the raw prompt and the raw text; any <think>…</think> in the output must arrive
+        # verbatim so legacy clients can parse it themselves.
+        FakeEngine.pieces = ["<think>foo</think>bar"]
+        # Non-streaming
+        resp, data = self.request("POST", "/v1/completions", {"model": "qwen-coder-gpu", "prompt": "hi"})
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(data["choices"][0]["text"], "<think>foo</think>bar")
+
+        # Streaming
+        chunks = self.stream("/v1/completions", {"model": "qwen-coder-gpu", "prompt": "hi", "stream": True})
+        full_text = "".join(c["choices"][0]["text"] for c in chunks if "text" in c["choices"][0])
+        self.assertEqual(full_text, "<think>foo</think>bar")
 
 
 class TestErrors(ServerTestBase):
@@ -206,16 +303,6 @@ class TestHealthAndModels(ServerTestBase):
 
 class TestStreamUsage(ServerTestBase):
     """OpenAI's stream_options.include_usage: token counts (and Prism's device telemetry) in the last streamed chunk."""
-
-    def stream(self, path, body):
-        resp, raw = self.request("POST", path, body, raw=True)
-        self.assertEqual(resp.status, 200)
-        events = [e[len("data: "):] for e in raw.decode().strip().split("\n\n")]
-        self.assertEqual(events[-1], "[DONE]")
-        return [json.loads(e) for e in events[:-1]]
-
-    def chat_body(self, **extra):
-        return {"model": "qwen-coder-gpu", "stream": True, "messages": [{"role": "user", "content": "hi there"}], **extra}
 
     def test_usage_and_telemetry_arrive_in_a_last_chunk_without_choices(self):
         chunks = self.stream("/v1/chat/completions", self.chat_body(stream_options={"include_usage": True}))
@@ -370,6 +457,67 @@ class TestOllamaRouting(ServerTestBase):
         call = next(d["tool_calls"][0] for d in deltas if "tool_calls" in d)
         self.assertEqual((call["index"], call["function"]["name"]), (0, "f"))
         self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "tool_calls")
+
+    def test_ollama_reasoning_streaming_and_non_streaming(self):
+        self.custom_chunks = ["<think>\n", "ollama thinking\n", "</think>\n", "ollama response"]
+
+        def fake_stream(model, messages, options=None, **kw):
+            yield from getattr(self, "custom_chunks", ["Hi", " there"])
+            if kw.get("stats") is not None:
+                kw["stats"].update(getattr(self, "ollama_stats", {}))
+
+        with patch("prism.server.stream_ollama_chat", side_effect=fake_stream):
+            # Non-streaming
+            resp, data = self.chat(model="tiny:1b")
+            self.assertEqual(resp.status, 200)
+            msg = data["choices"][0]["message"]
+            self.assertEqual(msg.get("reasoning_content"), "ollama thinking")
+            self.assertEqual(msg.get("content"), "ollama response")
+
+            # Streaming
+            _, raw = self.request("POST", "/v1/chat/completions",
+                                  {"model": "tiny:1b", "stream": True, "messages": [{"role": "user", "content": "x"}]},
+                                  raw=True)
+            chunks = [json.loads(e[len("data: "):]) for e in raw.decode().strip().split("\n\n") if e.startswith("data: ") and e != "data: [DONE]"]
+            reasoning = "".join(c["choices"][0]["delta"].get("reasoning_content", "") for c in chunks if "delta" in c["choices"][0])
+            content = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks if "delta" in c["choices"][0])
+            self.assertIn("ollama thinking", reasoning)
+            self.assertEqual(content, "ollama response")
+
+    def test_ollama_legacy_completions_leave_think_tags_intact(self):
+        self.custom_chunks = ["<think>thinking</think>answer"]
+
+        def fake_stream(model, messages, options=None, **kw):
+            yield from getattr(self, "custom_chunks", ["Hi", " there"])
+
+        with patch("prism.server.stream_ollama_chat", side_effect=fake_stream):
+            # Non-streaming
+            resp, data = self.request("POST", "/v1/completions", {"model": "tiny:1b", "prompt": "hello"})
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(data["choices"][0]["text"], "<think>thinking</think>answer")
+
+            # Streaming
+            _, raw = self.request("POST", "/v1/completions", {"model": "tiny:1b", "prompt": "hello", "stream": True}, raw=True)
+            chunks = [json.loads(e[len("data: "):]) for e in raw.decode().strip().split("\n\n") if e.startswith("data: ") and e != "data: [DONE]"]
+            full_text = "".join(c["choices"][0]["text"] for c in chunks if "text" in c["choices"][0])
+            self.assertEqual(full_text, "<think>thinking</think>answer")
+
+    def test_ollama_tool_calling_with_reasoning(self):
+        self.custom_chunks = ["<think>ollama plan</think>"]
+        self.ollama_stats = {"tool_calls": [{"name": "get_weather", "arguments": {"city": "Paris"}}], "finish_reason": "tool_calls"}
+
+        def fake_stream(model, messages, options=None, **kw):
+            yield from getattr(self, "custom_chunks", ["Hi", " there"])
+            if kw.get("stats") is not None:
+                kw["stats"].update(getattr(self, "ollama_stats", {}))
+
+        with patch("prism.server.stream_ollama_chat", side_effect=fake_stream):
+            # Non-streaming
+            resp, data = self.chat(model="tiny:1b", tools=[WEATHER_TOOL])
+            self.assertEqual(resp.status, 200)
+            msg = data["choices"][0]["message"]
+            self.assertEqual(msg.get("reasoning_content"), "ollama plan")
+            self.assertEqual(msg["tool_calls"][0]["function"]["name"], "get_weather")
 
 
 class TestStopMatcher(unittest.TestCase):
@@ -595,6 +743,26 @@ class TestToolCalling(ServerTestBase):
         FakeEngine.pieces = ["Hello END", " tail"]
         _, data = self.ask(stop="END")
         self.assertEqual(data["choices"][0]["message"]["content"], "Hello ")
+
+    def test_tool_calling_with_reasoning_non_streaming(self):
+        FakeEngine.pieces = ["<think>need current weather</think>", '<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>']
+        resp, data = self.ask()
+        self.assertEqual(resp.status, 200)
+        choice = data["choices"][0]
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertEqual(choice["message"]["reasoning_content"], "need current weather")
+        self.assertEqual(choice["message"]["tool_calls"][0]["function"]["name"], "get_weather")
+
+    def test_tool_calling_with_reasoning_streaming(self):
+        FakeEngine.pieces = ["<think>need current weather</think>", '<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>']
+        _, raw = self.request("POST", "/v1/chat/completions",
+                              {"model": "tool-model", "stream": True, "tools": [WEATHER_TOOL],
+                               "messages": [{"role": "user", "content": "weather?"}]}, raw=True)
+        chunks = [json.loads(e[len("data: "):]) for e in raw.decode().strip().split("\n\n") if e.startswith("data: ") and e != "data: [DONE]"]
+        reasoning = "".join(c["choices"][0]["delta"].get("reasoning_content", "") for c in chunks if "delta" in c["choices"][0])
+        self.assertEqual(reasoning, "need current weather")
+        call = next(d["tool_calls"][0] for d in [c["choices"][0]["delta"] for c in chunks if "delta" in c["choices"][0]] if "tool_calls" in d)
+        self.assertEqual(call["function"]["name"], "get_weather")
 
 
 class TestToolsRejected(ServerTestBase):

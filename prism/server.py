@@ -23,6 +23,7 @@ from prism import PRISM_BANNER
 from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from prism.engine import Engine, OnnxGenAiEngine
 from prism.ollama_bridge import embed_ollama, stream_ollama_chat
+from prism.reasoning import extract_reasoning, stream_reasoning
 from prism.resources import InsufficientResourcesError
 from prism.telemetry import get_gpu_info
 from prism.templates import flatten_content, render_prompt, supports_tools
@@ -593,13 +594,16 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
         created = int(time.time())
 
         def chunk(delta_text: Optional[str], finish: Optional[str], role: bool = False,
-                  tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                  tool_calls: Optional[List[Dict[str, Any]]] = None,
+                  reasoning_text: Optional[str] = None) -> Dict[str, Any]:
             if chat:
                 delta: Dict[str, Any] = {}
                 if role:
                     delta["role"] = "assistant"
                 if delta_text is not None:
                     delta["content"] = delta_text
+                if reasoning_text is not None:
+                    delta["reasoning_content"] = reasoning_text
                 if tool_calls:
                     delta["tool_calls"] = tool_calls
                 choice = {"index": 0, "delta": delta, "finish_reason": finish}
@@ -610,12 +614,18 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
 
         def final(text: str, finish: str, prompt_tokens: Optional[int], completion_tokens: Optional[int],
                   telemetry: Optional[Dict[str, Any]] = None,
-                  tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                  tool_calls: Optional[List[Dict[str, Any]]] = None,
+                  reasoning: Optional[str] = None) -> Dict[str, Any]:
             if chat and tool_calls:
-                message = {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
+                message: Dict[str, Any] = {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
+                if reasoning:
+                    message["reasoning_content"] = reasoning
                 choice = {"index": 0, "message": message, "finish_reason": finish}
             elif chat:
-                choice = {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": finish}
+                message = {"role": "assistant", "content": text}
+                if reasoning:
+                    message["reasoning_content"] = reasoning
+                choice = {"index": 0, "message": message, "finish_reason": finish}
             else:
                 choice = {"index": 0, "text": text, "finish_reason": finish}
             body: Dict[str, Any] = {"id": cmpl_id, "object": obj, "created": created, "model": model_id,
@@ -641,7 +651,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
 
         if resolved.get("backend") == "ollama":
             self._generate_ollama(resolved, messages, stream, max_tokens, temperature, top_p, stop, include_usage,
-                                  chunk, final, usage_chunk, tools, sampling)
+                                  chunk, final, usage_chunk, tools, sampling, chat=chat)
             return
 
         def resolve_tools(text: str, finish: str):
@@ -673,11 +683,13 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 max_tokens = min(max_tokens, window - prompt_tokens)  # the room left; hitting it reports finish_reason "length"
             if not stream and not stop:
                 result = engine.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p, **sampling)
-                text, finish, calls = resolve_tools(result["text"], result.get("finish_reason", "stop"))
+                raw_text = result["text"]
+                reasoning, text = extract_reasoning(raw_text) if chat else (None, raw_text)
+                text, finish, calls = resolve_tools(text, result.get("finish_reason", "stop"))
                 self._send_json(200, final(
                     text, finish, prompt_tokens, result["tokens_generated"],
                     {"ttft_sec": result["ttft_sec"], "decode_tok_per_sec": result["decode_tok_per_sec"],
-                     "device": result.get("device")}, calls,
+                     "device": result.get("device")}, calls, reasoning=reasoning,
                 ))
                 return
 
@@ -691,11 +703,12 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
 
             if not stream:
                 try:
-                    text = "".join(pieces)
+                    raw_text = "".join(pieces)
                 finally:
                     gen.close()
+                reasoning, text = extract_reasoning(raw_text) if chat else (None, raw_text)
                 text, finish, calls = resolve_tools(text, "stop" if stats["stopped"] else engine.last_finish_reason)
-                self._send_json(200, final(text, finish, prompt_tokens, stats["tokens"], telemetry(), calls))
+                self._send_json(200, final(text, finish, prompt_tokens, stats["tokens"], telemetry(), calls, reasoning=reasoning))
                 return
 
             self._begin_sse()
@@ -704,13 +717,23 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                     self._sse(chunk(None, None, role=True))
                 if tools:
                     # A call can only be recognised in the finished text, so with tools the reply is not streamed token by token.
-                    text = "".join(pieces)
+                    raw_text = "".join(pieces)
+                    reasoning, text = extract_reasoning(raw_text) if chat else (None, raw_text)
                     text, finish, calls = resolve_tools(text, "stop" if stats["stopped"] else engine.last_finish_reason)
+                    if reasoning:
+                        self._sse(chunk(None, None, reasoning_text=reasoning))
                     if text:
                         self._sse(chunk(text, None))
                     if calls:
                         self._sse(chunk(None, None, tool_calls=[{"index": i, **c} for i, c in enumerate(calls)]))
                     self._sse(chunk(None, finish))
+                elif chat:
+                    for kind, piece in stream_reasoning(pieces):
+                        if kind == "reasoning":
+                            self._sse(chunk(None, None, reasoning_text=piece))
+                        else:
+                            self._sse(chunk(piece, None))
+                    self._sse(chunk(None, "stop" if stats["stopped"] else engine.last_finish_reason))
                 else:
                     for piece in pieces:
                         self._sse(chunk(piece, None))
@@ -728,7 +751,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 gen.close()
 
     def _generate_ollama(self, resolved, messages, stream, max_tokens, temperature, top_p, stop, include_usage,
-                         chunk, final, usage_chunk, tools=None, sampling=None):
+                         chunk, final, usage_chunk, tools=None, sampling=None, chat=False):
         options: Dict[str, Any] = {"num_predict": max_tokens, "temperature": temperature, "top_p": top_p, **(sampling or {})}
         if stop:
             options["stop"] = list(stop)  # Ollama applies stop sequences itself
@@ -747,19 +770,28 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
 
         if not stream:
             try:
-                text = "".join(chunks())
+                raw_text = "".join(chunks())
             except Exception as ex:
                 raise ApiError(502, f"Ollama backend error: {ex}", "server_error", "backend_unavailable")
+            reasoning, text = extract_reasoning(raw_text) if chat else (None, raw_text)
             calls = to_openai_tool_calls(stats["tool_calls"]) if stats.get("tool_calls") else None
             self._send_json(200, final(text, "tool_calls" if calls else stats.get("finish_reason", "stop"),
-                                       stats.get("prompt_tokens"), stats.get("completion_tokens"), None, calls))
+                                       stats.get("prompt_tokens"), stats.get("completion_tokens"), None, calls,
+                                       reasoning=reasoning))
             return
 
         self._begin_sse()
         try:
-            self._sse(chunk(None, None, role=True))
-            for piece in chunks():
-                self._sse(chunk(piece, None))
+            if chat:
+                self._sse(chunk(None, None, role=True))
+                for kind, piece in stream_reasoning(chunks()):
+                    if kind == "reasoning":
+                        self._sse(chunk(None, None, reasoning_text=piece))
+                    else:
+                        self._sse(chunk(piece, None))
+            else:
+                for piece in chunks():
+                    self._sse(chunk(piece, None))
             calls = to_openai_tool_calls(stats["tool_calls"], with_index=True) if stats.get("tool_calls") else None
             if calls:
                 self._sse(chunk(None, None, tool_calls=calls))

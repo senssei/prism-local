@@ -14,6 +14,7 @@ versions may include breaking changes).
   request was greedy (Phi-4-mini at temperature 1.5: 1 distinct output in 4 runs before, 4 in 4 now). When sampling, `top_k` is the model's own value if above 1, else 40.
 
 ### Added
+- Reasoning separation: `prism.reasoning` module extracting `<think>...</think>` blocks into `message.reasoning_content` (and streaming `delta.reasoning_content`) for OpenAI-compatible `/v1/chat/completions` across ONNX and Ollama backends, while keeping raw output intact for legacy `/v1/completions`.
 - Thread control: `PRISM_THREADS` environment variable to set intra-op thread count via session_options overlay on ONNX models.
 - Diagnostics and telemetry: `prism status` displays system RAM and swap usage; model loads log memory deltas ("VRAM +N MB, RAM +N MB"); `prism doctor` inspects Windows WSL2 `.wslconfig` and warns if `memory=` or `autoMemoryReclaim=gradual` are missing.
 - Request queue limit: `--max-queue` CLI flag and `$PRISM_MAX_QUEUE` (default 8) to bound waiting requests for active ONNX model, immediately returning 503 `server_busy` when full.

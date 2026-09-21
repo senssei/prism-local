@@ -112,5 +112,55 @@ class TestStreamStats(unittest.TestCase):
             self.assertEqual("".join(stream_ollama_chat("m", [])), "x")
 
 
+class TestThinking(unittest.TestCase):
+    """`stream_ollama_chat` wraps Ollama's `message.thinking` deltas with `<think>`/`</think>` tags so the
+    downstream reasoning extraction in `prism.reasoning` has the same wire shape it already handles. These
+    tests exercise that wrapping with ndjson fixtures at the bridge level (no server, no FakeEngine)."""
+
+    def stream(self, *lines):
+        stats = {}
+        with patch("urllib.request.urlopen", return_value=ndjson(*lines)):
+            text = "".join(stream_ollama_chat("ollama:m", [], stats=stats))
+        return text, stats
+
+    def test_thinking_then_content_is_wrapped(self):
+        text, _ = self.stream(
+            {"message": {"thinking": "step one", "content": ""}, "done": False},
+            {"message": {"thinking": " step two", "content": ""}, "done": False},
+            {"message": {"thinking": "", "content": "answer"}, "done": False},
+            {"message": {"content": ""}, "done": True},
+        )
+        self.assertEqual(text, "<think>step one step two</think>answer")
+
+    def test_thinking_only_flushes_close_tag_on_done(self):
+        # The daemon never sends a content chunk before `done`. The bridge must still emit the closing
+        # </think> so the downstream extractor sees a complete block.
+        text, _ = self.stream(
+            {"message": {"thinking": "only thinking", "content": ""}, "done": False},
+            {"message": {"thinking": " more", "content": ""}, "done": True},
+        )
+        self.assertEqual(text, "<think>only thinking more</think>")
+
+    def test_empty_thinking_is_skipped(self):
+        text, _ = self.stream(
+            {"message": {"thinking": "", "content": "no reasoning"}, "done": False},
+            {"message": {"content": ""}, "done": True},
+        )
+        self.assertEqual(text, "no reasoning")
+        self.assertNotIn("<think>", text)
+
+    def test_thinking_chunks_with_no_content_keep_state(self):
+        text, _ = self.stream(
+            {"message": {"thinking": "alpha", "content": ""}, "done": False},
+            {"message": {"thinking": "beta", "content": ""}, "done": False},
+            {"message": {"thinking": "", "content": "hi"}, "done": False},
+            {"message": {"content": ""}, "done": True},
+        )
+        # Exactly one open tag and one close tag, regardless of how many `thinking` chunks arrived in between.
+        self.assertEqual(text.count("<think>"), 1)
+        self.assertEqual(text.count("</think>"), 1)
+        self.assertEqual(text, "<think>alphabeta</think>hi")
+
+
 if __name__ == "__main__":
     unittest.main()

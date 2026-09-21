@@ -94,6 +94,7 @@ def stream_ollama_chat(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    in_thinking = False
     with urllib.request.urlopen(req, timeout=180) as resp:
         for line in resp:
             if line:
@@ -115,9 +116,20 @@ def stream_ollama_chat(
                             args = fn.get("arguments")
                             stats.setdefault("tool_calls", []).append(
                                 {"name": fn["name"], "arguments": args if isinstance(args, dict) else {}})
+                thinking = message.get("thinking", "")
+                if thinking:
+                    if not in_thinking:
+                        in_thinking = True
+                        yield "<think>"
+                    yield thinking
                 content = message.get("content", "")
                 if content:
+                    if in_thinking:
+                        in_thinking = False
+                        yield "</think>"
                     yield content
+        if in_thinking:
+            yield "</think>"
 
 
 def embed_ollama(model: str, inputs: List[str], base_url: Optional[str] = None) -> Tuple[List[List[float]], int]:

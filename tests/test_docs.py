@@ -64,6 +64,10 @@ class TestDocsCoverage(unittest.TestCase):
         self.assertIn("Parallel use", text)
         self.assertIn(".wslconfig", text)
 
+    def test_reasoning_content_documented_in_api(self):
+        text = (DOCS / "api.md").read_text()
+        self.assertIn("reasoning_content", text)
+
 
 if __name__ == "__main__":
     unittest.main()

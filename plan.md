@@ -48,11 +48,11 @@ Do not run a double model load on this workstation without the guard; verify wit
 
 ## Phase 2: Reasoning content separation
 
-Spec: `spec.md` section 4 (P7). Status: proposed, awaiting operator approval.
+Spec: `spec.md` section 4 (P7). Status: Phase 2 complete; review-2 found 7 issues (1 correctness, 4 spec coverage, 2 style) — all closed test-first in `prism/reasoning.py` (preamble-aware streaming, LOOKAHEAD=8 buffer per spec P7) and `prism/server.py` (`final()` omits empty `reasoning_content`); gate green (391 tests).
 
-- [ ] 2.1 `prism/reasoning.py`: `extract_reasoning(text)` for complete texts and `stream_reasoning(pieces)` streaming iterator with lookahead buffer for `<think>` and `</think>` tags across chunk boundaries (test: `tests/test_prism_reasoning.py`).
-- [ ] 2.2 Wire into `/v1/chat/completions` (`prism/server.py`, `prism/ollama_bridge.py`): non-streaming `message.reasoning_content`, streaming `delta.reasoning_content`, buffered tool calls with reasoning, and Ollama reasoning support (tests: `tests/test_prism_server_api.py`).
-- [ ] 2.3 Documentation and release notes: update `docs/api.md` (Responses and streaming with `reasoning_content`), update `CHANGELOG.md` under `[Unreleased]` (tests: `tests/test_docs.py`, `scripts/sdlc_check.py`).
+- [x] 2.1 `prism/reasoning.py`: `extract_reasoning(text)` for complete texts and `stream_reasoning(pieces)` streaming iterator with lookahead buffer for `<think>` and `</think>` tags across chunk boundaries (test: `tests/test_prism_reasoning.py`).
+- [x] 2.2 Wire into `/v1/chat/completions` (`prism/server.py`, `prism/ollama_bridge.py`): non-streaming `message.reasoning_content`, streaming `delta.reasoning_content`, buffered tool calls with reasoning, and Ollama reasoning support (tests: `tests/test_prism_server_api.py`).
+- [x] 2.3 Documentation and release notes: update `docs/api.md` (Responses and streaming with `reasoning_content`), update `CHANGELOG.md` under `[Unreleased]` (tests: `tests/test_docs.py`, `scripts/sdlc_check.py`).
 
 ---
 

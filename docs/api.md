@@ -67,13 +67,13 @@ Message `content` may be a string or a list of parts; text parts are used and ot
 ## Responses
 
 Non-streaming responses follow the OpenAI shape. `finish_reason` is `stop` (end of sequence) or `length` (hit `max_tokens`, or, on ONNX models, the model was stopped because it kept repeating the same token cycle; see [`PRISM_LOOP_GUARD`](getting-started.md#configuration)),
-and `usage` uses the model tokenizer. Ollama responses carry the `finish_reason` and `usage` the daemon reports (none if it reports none). ONNX responses add a Prism extension:
+and `usage` uses the model tokenizer. When reasoning models (e.g. Qwen 2.5/3, DeepSeek-R1) generate `<think>...</think>` blocks, the thinking is separated into `message.reasoning_content` and stripped from `message.content`. Ollama responses carry the `finish_reason` and `usage` the daemon reports (none if it reports none). ONNX responses add a Prism extension:
 
 ```json
 "telemetry": { "ttft_sec": 0.45, "decode_tok_per_sec": 85.2, "device": "cuda" }
 ```
 
-Streaming sends `chat.completion.chunk` events: a first chunk with `delta: {"role": "assistant"}`, content deltas, a final chunk
+Streaming sends `chat.completion.chunk` events: a first chunk with `delta: {"role": "assistant"}`, deltas (during thinking, `delta: {"reasoning_content": "..."}`; afterwards, `delta: {"content": "..."}`), a final chunk
 with the `finish_reason`, then `data: [DONE]`. With `stream_options: {"include_usage": true}` one more chunk with an empty `choices` list
 comes after the `finish_reason` chunk and before `[DONE]`, carrying `usage` (`prompt_tokens`, `completion_tokens`, `total_tokens`, from the model
 tokenizer) and the same `telemetry` block as non-streaming responses; without the option the stream is unchanged. If generation fails after streaming has begun, an event
@@ -82,7 +82,7 @@ tokenizer) and the same `telemetry` block as non-streaming responses; without th
 ## Tool calling
 
 Send `tools` as you would to OpenAI. When the model calls one, the reply carries `message.tool_calls` (`id`, `type: "function"`, `function.name`, and
-`function.arguments` as a JSON **string**), `content` holds any text that came before the call (or is `null`), and `finish_reason` is `tool_calls`.
+`function.arguments` as a JSON **string**), `content` holds any text that came before the call (or is `null`), and `finish_reason` is `tool_calls`. For reasoning models, any `<think>...</think>` block preceding the tool call is extracted into `message.reasoning_content` (or streamed in a `delta: {"reasoning_content": ...}` chunk) rather than leaked into `content`.
 Send the result back as a `{"role": "tool", "tool_call_id": ..., "content": ...}` message after the assistant message that made the call.
 
 - **ONNX models** need the model's own chat template to take tools, and Prism renders that template only with the optional
@@ -90,8 +90,8 @@ Send the result back as a `{"role": "tool", "tool_call_id": ..., "content": ...}
   `400 tools_not_supported` instead of a silent non-answer. The model writes its calls as text in its own convention (`<tool_call>…`, `<|tool_call|>…`,
   `[TOOL_CALLS]…`, `<|python_tag|>…`, or a bare JSON object); Prism recognises them in the output. Those markers are special tokens that ONNX Runtime GenAI decodes
   to nothing, so the engine puts them back.
-- **Streaming** with `tools` on an ONNX model is **buffered**: the calls can only be recognised in the finished text, so the reply arrives at the end, as a content
-  chunk and/or one `tool_calls` delta, then the `finish_reason` chunk. Without `tools` streaming is token by token as before.
+- **Streaming** with `tools` on an ONNX model is **buffered**: the calls can only be recognised in the finished text, so the reply arrives at the end, as a reasoning
+  chunk (if present), a content chunk and/or one `tool_calls` delta, then the `finish_reason` chunk. Without `tools` streaming is token by token as before.
 - **Ollama models** get `tools` passed to the daemon, which parses the calls itself (use a model that supports tools, such as `llama3.1` or `qwen2.5`).
 - Whether a call is *right* depends on the model; small models are unreliable. Prism guarantees the shape of the reply, not the choice of tool.
 
