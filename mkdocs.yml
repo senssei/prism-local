@@ -59,6 +59,10 @@ nav:
   - Project:
       - Architecture: architecture.md
       - Development: development.md
+      - Agent SDLC workflow: sdlc.md
+      - Intent: sdlc/intent.md
+      - Specification: sdlc/spec.md
+      - Review policy: sdlc/review.md
       - Changelog: changelog.md
   - Research:
       - Overview: research/index.md

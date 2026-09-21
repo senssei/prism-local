@@ -10,7 +10,7 @@ pip install -e ".[dev,docs]"
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
 
-The suite (about 270 tests, ~10 s) needs no GPU, network, Ollama or model files.
+The suite (about 300 tests, ~20 s) needs no GPU, network, Ollama or model files.
 
 | Area | How it is tested without hardware |
 |---|---|
@@ -45,6 +45,22 @@ Pages are published to GitHub Pages by `.github/workflows/docs.yml` on every pus
 
 `.github/workflows/ci.yml` runs the unit tests on Python 3.10–3.12, byte-compiles the package, and builds a wheel that is
 installed in a fresh virtualenv and smoke-tested with `prism --help` and `prism doctor`.
+
+## Working with AI coding agents
+
+The repository carries one agent workflow that works across harnesses (Claude Code, Codex, Cursor, Copilot, Gemini CLI). Every
+non-trivial change goes through intent, spec, plan, test, code and review, and each stage leaves a committed file:
+
+| File | Read by | Purpose |
+|---|---|---|
+| `AGENTS.md` | Codex, Cursor, Copilot, Gemini CLI, ... | Commands, the process and the project rules; the single source of truth |
+| `CLAUDE.md` | Claude Code | Imports `AGENTS.md`, adds Claude-only notes |
+| `intent.md`, `spec.md`, `plan.md`, `REVIEW.md` | Agents and humans | Intent, specification, plan (the state of the work) and review policy |
+| `.agents/skills/sdlc*` | Skill-aware agents; Claude Code through the `.claude/skills` symlink | One skill per stage group |
+| `scripts/sdlc_check.py` | Agents, humans, CI | Deterministic gate (compile, tests, changelog, docs) and `--red` |
+| `.githooks/pre-commit` | git (opt-in) | Runs the gate before each commit: `git config core.hooksPath .githooks` |
+
+Details: [Agent SDLC workflow](sdlc.md).
 
 ## Keeping the model aliases honest
 

@@ -31,6 +31,19 @@ jobs:
           PYTHONPATH: .
         run: python -m unittest discover -s tests -v
 
+  changelog:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the gate diffs against the merge-base with the target branch
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Runtime changes need a CHANGELOG.md entry
+        run: python scripts/sdlc_check.py --only changelog --base "origin/${{ github.base_ref }}"
+
   package:
     runs-on: ubuntu-latest
     steps:

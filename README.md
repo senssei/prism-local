@@ -16,7 +16,7 @@ Prism puts **ONNX Runtime GenAI** (CUDA or CPU) and **Ollama / llama.cpp** (GGUF
 
 📖 **Documentation:** <https://senssei.github.io/prism-local/>
 
-> **Status: alpha (v0.2.0).** It works, it is tested (~270 tests, no GPU needed), and its defaults are safe
+> **Status: alpha (v0.2.0).** It works, it is tested (~300 tests, no GPU needed), and its defaults are safe
 > (loopback-only, no CORS). APIs and flags may still change. See [Known limitations](https://github.com/senssei/prism-local#known-limitations).
 
 ## Why
@@ -137,7 +137,7 @@ it really used, and `prism doctor` shows a CUDA library mismatch.
 
 ```bash
 pip install -e ".[dev]"
-PYTHONPATH=. python3 -m unittest discover -s tests -v    # ~270 tests, ~10 s, no GPU/network/models needed
+PYTHONPATH=. python3 -m unittest discover -s tests -v    # ~300 tests, ~20 s, no GPU/network/models needed
 pip install -e ".[docs]" && mkdocs serve                  # docs site at http://127.0.0.1:8000
 ```
 

@@ -14,6 +14,7 @@ versions may include breaking changes).
   request was greedy (Phi-4-mini at temperature 1.5: 1 distinct output in 4 runs before, 4 in 4 now). When sampling, `top_k` is the model's own value if above 1, else 40.
 
 ### Added
+- AI-native SDLC for coding agents (Claude Code, Codex, Cursor, ...): `intent.md`, `spec.md`, `plan.md` and `REVIEW.md` as committed artifacts, `AGENTS.md`, `sdlc*` skills in `.agents/skills/`, `scripts/sdlc_check.py` (gate, and `--red` to prove a new test fails first), an opt-in `.githooks/pre-commit`, and a CI changelog check on pull requests. See `docs/sdlc.md`.
 - `top_k` and `repetition_penalty` request fields (ONNX and Ollama); `frequency_penalty` / `presence_penalty` go to Ollama, and on ONNX a non-zero value is a `400`
   `unsupported_parameter` instead of being silently ignored.
 - Loop guard: an ONNX generation that ends in a repeating token cycle (period up to 64 tokens, over at least 200 tokens and 12 repetitions) is stopped after a warning
