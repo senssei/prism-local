@@ -21,7 +21,7 @@ Re-bases the agent workflow on committed artifacts (see `AGENTS.md`).
   and `tests/test_sdlc_state.py` (the plan replaces the state file).
 - [x] Docs: `docs/sdlc.md` and `docs/sdlc/{intent,spec,review}.md` include the root files (snippets, no copies); `mkdocs.yml`;
   `docs/development.md`.
-- [ ] Commit in logical steps (blocked: `commit.gpgsign=true` and `gpg` needs the passphrase).
+- [x] Commit in logical steps.
 - [ ] Enable the hook locally: `git config core.hooksPath .githooks` (operator).
 
 ---
