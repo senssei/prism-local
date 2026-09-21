@@ -85,6 +85,20 @@ def prefill_chunk_tokens() -> Optional[int]:
     return value or None
 
 
+def intra_op_threads() -> Optional[int]:
+    """Threads for intra-op parallelism: $PRISM_THREADS (a positive integer > 0), default None."""
+    raw = os.environ.get("PRISM_THREADS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value <= 0:
+        raise ValueError(f"PRISM_THREADS must be a positive integer > 0 (got '{raw}')")
+    return value
+
+
 def read_eos_token_ids(model_path: str) -> frozenset:
     """End-of-sequence token ids from the model's genai_config.json (`model.eos_token_id`: an int or a list); empty when unknown."""
     try:
@@ -191,6 +205,7 @@ class OnnxGenAiEngine:
         self._eos_ids = read_eos_token_ids(self.model_path)
         self._top_k = read_config_top_k(self.model_path)
         self._loop_guard = loop_guard_enabled()
+        self._threads = intra_op_threads()
         # Marker tokens the tokenizer decodes to nothing; without them a tool call cannot be told from prose. See _find_stripped_markers.
         self._literal_tokens: Dict[int, str] = {}
         self._model = None
@@ -208,6 +223,9 @@ class OnnxGenAiEngine:
         chunk = prefill_chunk_tokens()
         if chunk and hasattr(config, "overlay"):
             config.overlay(json.dumps({"search": {"chunk_size": chunk}}))
+        threads = intra_op_threads()
+        if threads and hasattr(config, "overlay"):
+            config.overlay(json.dumps({"model": {"decoder": {"session_options": {"intra_op_num_threads": threads}}}}))
         return og.Model(config)
 
     def _load_model(self):

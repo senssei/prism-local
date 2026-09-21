@@ -59,6 +59,8 @@ and WSL `MemAvailable` cannot see that, so guarding VRAM matters most.
   `$PRISM_MAX_QUEUE` (default 8) waiters get `503 server_busy` immediately.
 - **P5 Diagnostics**: `prism status` shows RAM and swap; a load logs the VRAM and RAM delta; `prism doctor` warns, read-only, when
   a Windows `.wslconfig` has no `memory=` or `autoMemoryReclaim=gradual`. Prism never writes `.wslconfig`.
+- **P6 Thread control** (`PRISM_THREADS`): A positive integer setting intra-op thread count for ONNX models. When set,
+  `_model_for` overlays `model.decoder.session_options.intra_op_num_threads`. Unset (default) leaves thread allocation to the engine.
 - **Not covered**: Ollama (GGUF) shares the GPU and bypasses the guard; `vram_free_mb()` still sees its usage.
 
 ## 5. Development tooling contract

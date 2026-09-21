@@ -160,3 +160,4 @@ autoMemoryReclaim=gradual
 ```
 
 `prism doctor` inspects `.wslconfig` and reports whether these safety limits are active. Prism never modifies `.wslconfig`.
+5. **Thread control (`PRISM_THREADS`)**: By default, ONNX Runtime allocates internal thread pools based on CPU core count. When running alongside heavy host workloads or in shared environments, set `PRISM_THREADS` (a positive integer, e.g. `PRISM_THREADS=4`) to restrict intra-op parallelism and avoid CPU saturation during token generation.

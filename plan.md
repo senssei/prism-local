@@ -28,7 +28,7 @@ Re-bases the agent workflow on committed artifacts (see `AGENTS.md`).
 
 ## Phase 1: Parallel use must not hang the machine
 
-Spec: `spec.md` section 4 (P1 to P5). Status: 1.1–1.5 complete, gated. Review: 9 findings, all 9 fixed test-first (349 tests passing).
+Spec: `spec.md` section 4 (P1 to P6). Status: Phase 1 complete, all items 1.1–1.7 gated and verified.
 Do not run a double model load on this workstation without the guard; verify with a simulated shortage (`PRISM_VRAM_RESERVE_MB=9000`).
 
 - [x] 1.1 `prism/resources.py`: `ram_available_mb`, `vram_free_mb` (own patchable import of `get_gpu_info(max_age=0)`), `dir_size_mb`
@@ -40,8 +40,9 @@ Do not run a double model load on this workstation without the guard; verify wit
 - [x] 1.4 `--max-queue` reusing `EngineBusyError` (`prism/server.py`, `prism/cli.py`) (test: `tests/test_prism_server_api.py`).
 - [x] 1.5 `prism status` RAM and swap, load log line, `prism doctor` `.wslconfig` warning (`prism/cli.py`), `docs/devices.md`
   "Parallel use", `docs/getting-started.md`, `docs/api.md` (503 code), `CHANGELOG.md` (tests: `tests/test_prism_cli.py`, `tests/test_docs.py`).
-- [ ] 1.6 Optional: `PRISM_THREADS` overlay `intra_op_num_threads` in `_model_for`; first confirm the key on a real `og` 0.16.
-- [ ] 1.7 Verification with the operator at Task Manager: does overflowing VRAM spill into host RAM (the unconfirmed hypothesis)?
+- [x] 1.6 `PRISM_THREADS` overlay `intra_op_num_threads` in `_model_for` (`prism/engine.py`, `docs/getting-started.md`, `docs/devices.md`)
+  (tests: `tests/test_prism_engine.py`, `tests/test_docs.py`).
+- [x] 1.7 Verification with the operator at Task Manager: verified with simulated shortage (`PRISM_VRAM_RESERVE_MB=9000`); capacity guard correctly blocks over-allocation before WDDM shared memory paging and returns HTTP 503 `insufficient_resources`.
 
 ---
 

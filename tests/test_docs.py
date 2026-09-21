@@ -50,7 +50,8 @@ class TestDocsCoverage(unittest.TestCase):
         text = (DOCS / "getting-started.md").read_text()
         for var in ("PRISM_MODEL_DIRS", "PRISM_DEVICE", "PRISM_API_KEY", "PRISM_BASE_URL", "PRISM_PYTHON",
                     "PRISM_RAM_RESERVE_MB", "PRISM_VRAM_RESERVE_MB", "PRISM_RESOURCE_CHECK",
-                    "PRISM_LOAD_TIMEOUT", "PRISM_LOAD_LOCK", "PRISM_MAX_QUEUE", "PRISM_STATE_DIR"):
+                    "PRISM_LOAD_TIMEOUT", "PRISM_LOAD_LOCK", "PRISM_MAX_QUEUE", "PRISM_STATE_DIR",
+                    "PRISM_THREADS"):
             self.assertIn(var, text, f"{var} is missing from docs/getting-started.md")
 
     def test_503_and_queue_documented_in_api(self):

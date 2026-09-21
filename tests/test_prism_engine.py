@@ -186,6 +186,26 @@ class TestOnnxGenAiEngine(unittest.TestCase):
             _, fake = self.make()
         self.assertEqual(fake.calls["overlays"], [{"search": {"chunk_size": 1024}}])
 
+    def test_threads_overlay_applied_when_env_var_set(self):
+        with patch.dict(os.environ, {"PRISM_THREADS": "4", "PRISM_PREFILL_CHUNK": "off"}):
+            _, fake = self.make()
+        self.assertEqual(fake.calls["overlays"],
+                         [{"model": {"decoder": {"session_options": {"intra_op_num_threads": 4}}}}])
+
+    def test_threads_invalid_value_raises_value_error(self):
+        for bad in ("0", "-2", "abc", "2.5"):
+            with self.subTest(value=bad), patch.dict(os.environ, {"PRISM_THREADS": bad}):
+                with self.assertRaises(ValueError) as ctx:
+                    self.make()
+                self.assertIn("PRISM_THREADS", str(ctx.exception))
+
+    def test_threads_unset_by_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PRISM_THREADS", None)
+            with patch.dict(os.environ, {"PRISM_PREFILL_CHUNK": "off"}):
+                _, fake = self.make()
+        self.assertEqual(fake.calls["overlays"], [])
+
     def test_sampling_never_inherits_a_top_k_of_one(self):
         # genai_config.json usually says top_k 1, which makes the library ignore temperature and top_p (every request greedy).
         import json
