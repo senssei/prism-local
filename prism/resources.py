@@ -72,7 +72,12 @@ def ram_available_mb() -> float:
 
 def is_wsl_system() -> bool:
     """Returns True if the current environment is running inside WSL."""
-    if os.environ.get("PRISM_FORCE_WSL") == "1":
+    forced = os.environ.get("PRISM_FORCE_WSL")
+    if forced == "1":
+        return True
+    if forced == "0":
+        return False
+    if os.environ.get("PRISM_WSLCONFIG_PATH"):
         return True
     try:
         with open("/proc/version", "r", encoding="utf-8") as f:
@@ -109,7 +114,7 @@ def inspect_wslconfig(path: Optional[Union[str, Path]] = None) -> Dict[str, Any]
     Inspects a Windows .wslconfig file for memory limits and autoMemoryReclaim.
     Read-only: Prism NEVER modifies .wslconfig.
     """
-    wsl = is_wsl_system()
+    wsl = is_wsl_system() or path is not None
     p = Path(path) if path is not None else find_wslconfig_path()
     if p is None or not p.is_file():
         return {

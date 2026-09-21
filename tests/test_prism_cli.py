@@ -185,7 +185,7 @@ class TestDoctorWslconfig(unittest.TestCase):
         cfg_path = os.path.join(self.tmp, ".wslconfig")
         with open(cfg_path, "w") as f:
             f.write("[wsl2]\nvmIdleTimeout=-1\n")
-        code, out = run_cli("doctor", env={"PRISM_WSLCONFIG_PATH": cfg_path})
+        code, out = run_cli("doctor", env={"PRISM_WSLCONFIG_PATH": cfg_path, "PRISM_FORCE_WSL": "1"})
         self.assertEqual(code, 0)
         self.assertIn("WSL configuration", out)
         self.assertIn("Missing 'memory='", out)
@@ -195,7 +195,7 @@ class TestDoctorWslconfig(unittest.TestCase):
         cfg_path = os.path.join(self.tmp, ".wslconfig")
         with open(cfg_path, "w") as f:
             f.write("[wsl2]\nmemory=16GB\nautoMemoryReclaim=gradual\n")
-        code, out = run_cli("doctor", env={"PRISM_WSLCONFIG_PATH": cfg_path})
+        code, out = run_cli("doctor", env={"PRISM_WSLCONFIG_PATH": cfg_path, "PRISM_FORCE_WSL": "1"})
         self.assertEqual(code, 0)
         self.assertIn("WSL configuration", out)
         self.assertIn("memory limit and autoMemoryReclaim configured", out)
@@ -206,6 +206,11 @@ class TestDoctorWslconfig(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("WSL configuration", out)
         self.assertIn("no .wslconfig found", out)
+
+    def test_doctor_skips_wslconfig_when_not_wsl(self):
+        code, out = run_cli("doctor", env={"PRISM_FORCE_WSL": "0", "PRISM_WSLCONFIG_PATH": ""})
+        self.assertEqual(code, 0)
+        self.assertNotIn("WSL configuration", out)
 
 
 if __name__ == "__main__":

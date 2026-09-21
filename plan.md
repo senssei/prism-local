@@ -46,7 +46,17 @@ Do not run a double model load on this workstation without the guard; verify wit
 
 ---
 
-## Phase 2: Backlog (ordered by value; move an item up here before starting it)
+## Phase 2: Reasoning content separation
+
+Spec: `spec.md` section 4 (P7). Status: proposed, awaiting operator approval.
+
+- [ ] 2.1 `prism/reasoning.py`: `extract_reasoning(text)` for complete texts and `stream_reasoning(pieces)` streaming iterator with lookahead buffer for `<think>` and `</think>` tags across chunk boundaries (test: `tests/test_prism_reasoning.py`).
+- [ ] 2.2 Wire into `/v1/chat/completions` (`prism/server.py`, `prism/ollama_bridge.py`): non-streaming `message.reasoning_content`, streaming `delta.reasoning_content`, buffered tool calls with reasoning, and Ollama reasoning support (tests: `tests/test_prism_server_api.py`).
+- [ ] 2.3 Documentation and release notes: update `docs/api.md` (Responses and streaming with `reasoning_content`), update `CHANGELOG.md` under `[Unreleased]` (tests: `tests/test_docs.py`, `scripts/sdlc_check.py`).
+
+---
+
+## Phase 3: Backlog (ordered by value; move an item up here before starting it)
 
 ### Verification that needs hardware or a network
 - [ ] BOS handling for Mistral and Gemma: after `prism pull mistral-7b-instruct-v0.2`, check that the tokenizer adds `<s>`; if not, fix the
@@ -62,7 +72,6 @@ Do not run a double model load on this workstation without the guard; verify wit
 - [ ] Unknown template families (Llama 2, Mistral `[SYSTEM_PROMPT]`, Gemma without a template) fall back to ChatML by name.
 - [ ] Embeddings: token arrays in `input`, `dimensions`; ONNX embeddings are impossible today (ORT GenAI returns none).
 - [ ] Warn (log, `prism doctor`, `GET /v1/models`) when a CPU-exported model runs on CUDA.
-- [ ] `<think>` blocks of Qwen3 land in `content`; consider `reasoning_content`.
 
 ### Small and closed
 - [ ] `--variant`: a CLI test that passes the flag to `pull_model`; add it to the command table in `README.md`.

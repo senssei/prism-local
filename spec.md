@@ -40,10 +40,19 @@ Tests and reviews cite these by number. Changing one needs operator approval.
 | An ONNX generation ends in a repeating token cycle | Stopped after a warning, reported as `finish_reason: length`; `PRISM_LOOP_GUARD=off` disables | `CHANGELOG.md` |
 | Long prompt on ONNX | Prefill in chunks of `PRISM_PREFILL_CHUNK` (default 1024) to bound GPU memory | `docs/devices.md` |
 
-## 4. Planned behavior (not implemented; `plan.md` Phase 1)
+## 4. Planned behavior
 
-**Parallel use must not exhaust the machine.** Hypothesis, not yet measured: an overflowing VRAM on WDDM spills into host RAM,
-and WSL `MemAvailable` cannot see that, so guarding VRAM matters most.
+### Phase 2: Reasoning content separation (`plan.md` Phase 2)
+
+- **P7 Reasoning content separation**:
+  Models emitting `<think>...</think>` blocks (such as Qwen 2.5/3 with thinking, DeepSeek-R1) have their thoughts separated from final answer text for `/v1/chat/completions`.
+  - **Non-streaming**: `choices[0].message.reasoning_content` carries the thinking text (stripped of `<think>` and `</think>` tags). `choices[0].message.content` carries the remaining answer text. If `<think>` is unclosed at the end of generation (e.g. truncated by `max_tokens`), the thinking text goes to `reasoning_content` and `content` is `""`. If no `<think>` block is generated, `reasoning_content` is omitted.
+  - **Streaming**: Tokens generated inside `<think>...</think>` are emitted as `delta: {"reasoning_content": piece}`. Neither opening nor closing tags are emitted in the stream. Subsequent tokens are emitted as `delta: {"content": piece}`. A lookahead buffer (up to 8 characters) cleanly handles tags split across chunk boundaries without leaking tag fragments.
+  - **Ollama**: If Ollama emits `message.thinking` or `<think>` tags, it is handled identically, delivering `reasoning_content`.
+  - **Legacy text completions (`/v1/completions`)**: Unaffected; returns raw text.
+  - **Tool calling**: If a reasoning model emits `<think>...</think>` before a tool call, `reasoning_content` is extracted and provided alongside `tool_calls`.
+
+### Implemented (Phase 1: Parallel use must not exhaust the machine)
 
 - **P1 Resource budget** (`prism/resources.py`): before an ONNX model is loaded, `check_can_load(model_path, device)` compares free
   RAM (always) and free VRAM (`cuda` only) with the estimated need (weights plus prefill headroom of `PRISM_PREFILL_CHUNK` x about

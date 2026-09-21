@@ -27,6 +27,7 @@ versions may include breaking changes).
   in the log and reported as `finish_reason: length`. `PRISM_LOOP_GUARD=off` disables it.
 
 ### Fixed
+- Tests: WSL config doctor tests in `tests/test_prism_cli.py` now run hermetically on non-WSL Linux environments (`is_wsl_system` honors `PRISM_WSLCONFIG_PATH` and `PRISM_FORCE_WSL=0`).
 - ONNX engine dropped every token with id 0 (`!` in Phi-4: "Wow! Great!" came out as "Wow Great") and did not count it, so a reply cut off at `max_tokens` could be
   reported as `finish_reason: stop`.
 
