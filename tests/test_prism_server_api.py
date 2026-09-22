@@ -730,6 +730,86 @@ class TestQueueTimeout(ServerTestBase):
         t1.join(5)
         t2.join(5)
 
+    def test_queue_timeout_zero_waits_forever_with_is_alive(self):
+        """`--queue-timeout 0` (CLI) used to mean "wait forever" by matching the env-var path
+        (`default_queue_timeout()` returns None for `0`). The P9 poll loop must normalise the
+        same way; otherwise a CLI flag of 0 turns into an immediate 503. Regression test for F2."""
+        from prism.server import ClientDisconnectedError  # local import keeps test module order-agnostic
+        self.manager.queue_timeout = 0  # the regression case: pre-P9 -> `-1` branch -> forever
+        self.manager.lock.acquire()  # external hold so the test thread has to wait
+        try:
+            started = threading.Event()
+            done = threading.Event()
+            outcome: List[object] = []
+            def target():
+                started.set()
+                try:
+                    with self.manager.use_engine(
+                            {"id": "fake", "path": "/nope"}, is_alive=lambda: True):
+                        outcome.append("yielded")
+                except BaseException as ex:  # noqa: BLE001 — record whatever escapes
+                    outcome.append(ex)
+                done.set()
+            th = threading.Thread(target=target, daemon=True)
+            th.start()
+            started.wait(2)
+            self.assertFalse(done.is_set(),
+                             "use_engine returned for queue_timeout=0; should wait forever")
+            # Releasing the external hold lets the manager acquire and run to completion.
+            self.manager.lock.release()
+            self.assertTrue(done.wait(5), "use_engine did not finish after the lock was freed")
+            self.assertEqual(outcome, ["yielded"], f"unexpected outcome: {outcome!r}")
+        finally:
+            if self.manager.lock.acquire(blocking=False):
+                self.manager.lock.release()
+
+    def test_use_engine_releases_lock_when_is_alive_flips_after_acquire(self):
+        """P9 race window: `is_alive()` returns True at the top of the poll loop and the lock
+        is then acquired, but the peer has gone by the post-acquire recheck. The manager must
+        release the lock and raise `ClientDisconnectedError`, not yield the engine. Regression
+        test for F3."""
+        from prism.server import ClientDisconnectedError
+        self.manager.queue_timeout = 5.0
+        self.manager.lock.acquire()  # external hold forces the test thread into the poll loop
+        try:
+            call_count = [0]
+
+            def is_alive() -> bool:
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    # First call (top of poll loop): peer alive. Schedule the external lock
+                    # release so the next acquire returns immediately, and the recheck will see
+                    # the peer as gone.
+                    def release_soon():
+                        time.sleep(0.01)
+                        self.manager.lock.release()
+                    threading.Thread(target=release_soon, daemon=True).start()
+                    return True
+                return False  # second call (post-acquire recheck): peer is gone
+
+            outcome: List[object] = []
+            def target():
+                try:
+                    with self.manager.use_engine(
+                            {"id": "fake", "path": "/nope"}, is_alive=is_alive):
+                        outcome.append("yielded")
+                except BaseException as ex:  # noqa: BLE001
+                    outcome.append(ex)
+
+            th = threading.Thread(target=target, daemon=True)
+            th.start()
+            th.join(5)
+            self.assertFalse(th.is_alive(), "use_engine thread did not finish")
+            self.assertEqual(len(outcome), 1, f"unexpected outcomes: {outcome!r}")
+            self.assertIsInstance(outcome[0], ClientDisconnectedError, outcome)
+            # The lock must be released so the next caller can run.
+            self.assertTrue(self.manager.lock.acquire(blocking=False),
+                            "manager held the lock after the post-acquire disconnect")
+            self.manager.lock.release()
+        finally:
+            if self.manager.lock.acquire(blocking=False):
+                self.manager.lock.release()
+
 
 TOOL_TEMPLATE = ("{% if tools %}TOOLS:{% for t in tools %}{{ t.function.name }};{% endfor %}\n{% endif %}"
                  "{% for m in messages %}{{ m.role }}:{{ m.content }}"
@@ -957,6 +1037,48 @@ class TestClientDisconnect(ServerTestBase):
         self.assertLess(FakeEngine.produced, 400)
         resp, data = self.chat()  # lock was released; the server still serves
         self.assertEqual(resp.status, 200)
+
+    def test_queue_slot_released_when_client_disconnects_while_waiting(self):
+        """Phase 5 / P9: a request parked in `ActiveEngineManager.use_engine` waiting for the engine lock must
+        release its queue slot when the HTTP peer closes the connection, instead of holding it for the full
+        `--queue-timeout`. Without the fix, `waiting_count` only drops when the lock is eventually granted
+        (i.e. after the holder finishes, ~1.5 s here), so this 1 s deadline reliably fails."""
+        self.manager.queue_timeout = 30.0  # well above the test window: avoids the 503 path
+        self.manager.max_queue = 1  # force the second request into the queue, not into a fresh 503
+        FakeEngine.delay = 0.5  # the holder keeps the lock for ~1.5 s (3 pieces x delay)
+        FakeEngine.pieces = ["Hel", "lo", " world"]  # reset any 400-piece override from earlier tests
+
+        first = {}
+        t_holder = threading.Thread(target=lambda: first.update(zip(("resp", "data"), self.chat())))
+        t_holder.start()
+
+        deadline = time.time() + 5
+        while time.time() < deadline and FakeEngine.active == 0:
+            time.sleep(0.01)
+        self.assertEqual(FakeEngine.active, 1, "first request did not acquire the engine lock in time")
+
+        # Second request: a fresh connection we control so we can close it abruptly.
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        body = json.dumps({"model": "qwen-coder-gpu", "messages": [{"role": "user", "content": "wait"}]})
+        conn.request("POST", "/v1/chat/completions", body=body, headers={"Content-Type": "application/json"})
+        # The server-side handler is now parked in `use_engine` waiting for the lock.
+        deadline = time.time() + 5
+        while time.time() < deadline and self.manager.waiting_count == 0:
+            time.sleep(0.01)
+        self.assertEqual(self.manager.waiting_count, 1, "second request did not enter the queue")
+
+        conn.close()  # client gone; the holder is still running
+
+        deadline = time.time() + 1.0
+        while time.time() < deadline and self.manager.waiting_count > 0:
+            time.sleep(0.01)
+        self.assertEqual(self.manager.waiting_count, 0,
+                         "queue slot was not released after the waiting client disconnected")
+
+        # The holder finishes independently and is still served normally.
+        t_holder.join(10)
+        self.assertFalse(t_holder.is_alive(), "holder request thread did not finish")
+        self.assertEqual(first["resp"].status, 200, first)
 
 
 class TestAuthAndCors(ServerTestBase):

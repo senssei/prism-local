@@ -11,6 +11,7 @@ import http.server
 import json
 import logging
 import os
+import socket
 import socketserver
 import struct
 import threading
@@ -71,6 +72,45 @@ class EngineBusyError(RuntimeError):
     """The engine stayed busy with other requests for longer than the queue timeout."""
 
 
+class ClientDisconnectedError(RuntimeError):
+    """The HTTP client closed its connection while a request was waiting for the engine."""
+
+
+def is_connection_alive(conn: "socket.socket") -> bool:
+    """Whether `conn` (a stdlib socket) still has a live peer.
+
+    Temporarily sets the socket non-blocking and peeks one byte:
+      * empty bytes (`b""`) → the peer performed an orderly shutdown (FIN observed); the socket is dead.
+      * `BlockingIOError` → alive, no data pending.
+      * any other `OSError` (`ConnectionResetError`, `BrokenPipeError`, ...) → dead.
+
+    The previous blocking state is restored before returning, so the caller can keep using `conn`
+    for normal reads and writes after this returns `True`.
+    """
+    if conn is None:
+        return False
+    was_blocking = conn.getblocking()
+    if was_blocking:
+        try:
+            conn.setblocking(False)
+        except OSError:
+            return False
+    try:
+        try:
+            data = conn.recv(1, socket.MSG_PEEK)
+        finally:
+            if was_blocking:
+                try:
+                    conn.setblocking(True)
+                except OSError:
+                    pass
+        return bool(data)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+
+
 class ActiveEngineManager:
     """
     Owns the single active ONNX engine. A lock serializes model swaps and generation:
@@ -97,15 +137,55 @@ class ActiveEngineManager:
         self.waiting_count = 0
 
     @contextlib.contextmanager
-    def use_engine(self, resolved: Dict[str, Any]) -> Iterator[Engine]:
-        """Holds the lock for the duration of the block and yields a loaded engine."""
+    def use_engine(self, resolved: Dict[str, Any],
+                   is_alive: Optional[Callable[[], bool]] = None) -> Iterator[Engine]:
+        """Holds the lock for the duration of the block and yields a loaded engine.
+
+        `is_alive` (optional): a callable that returns `False` when the caller has gone away (e.g.
+        the peer closed its HTTP connection). When supplied, the manager poll-iterates with a 50 ms
+        tick instead of doing one blocking `acquire`; each tick checks `is_alive()` first, so a
+        disconnected request releases its queue slot instead of waiting out `queue_timeout`.
+        `None` (default) keeps the original blocking behaviour.
+        """
         with self.queue_lock:
             if self.max_queue is not None and self.max_queue > 0 and self.waiting_count >= self.max_queue:
                 raise EngineBusyError(f"request queue full (max {self.max_queue} waiting requests)")
             self.waiting_count += 1
         acquired = False
         try:
-            acquired = self.lock.acquire(timeout=self.queue_timeout if self.queue_timeout else -1)
+            if is_alive is None:
+                acquired = self.lock.acquire(timeout=self.queue_timeout if self.queue_timeout else -1)
+            else:
+                # Poll so we can notice the peer going away mid-wait (spec.md P9). Normalise
+                # `0`/negative to `None` so the poll loop waits forever: `$PRISM_QUEUE_TIMEOUT=0`
+                # already means "wait forever" via `default_queue_timeout()`, and a stray
+                # `--queue-timeout 0` on the CLI flag path used to reach the same `-1` branch above
+                # before P9 changed the wait into a poll.
+                effective_timeout: Optional[float] = (
+                    self.queue_timeout if (self.queue_timeout is None or self.queue_timeout > 0) else None
+                )
+                deadline: Optional[float] = (
+                    None if effective_timeout is None else time.monotonic() + effective_timeout
+                )
+                tick = 0.05
+                while True:
+                    if not is_alive():
+                        raise ClientDisconnectedError(
+                            "client disconnected while waiting for the engine lock")
+                    remaining: Optional[float] = None if deadline is None else max(0.0, deadline - time.monotonic())
+                    if remaining is not None and remaining <= 0:
+                        break
+                    wait = tick if remaining is None else min(tick, remaining)
+                    if self.lock.acquire(timeout=wait):
+                        acquired = True
+                        # The peer may have closed between the is_alive check and the acquire
+                        # returning; one recheck guards the slot before we do any model work.
+                        if not is_alive():
+                            self.lock.release()
+                            acquired = False
+                            raise ClientDisconnectedError(
+                                "client disconnected before generation could start")
+                        break
         finally:
             with self.queue_lock:
                 self.waiting_count -= 1
@@ -432,7 +512,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             handler()
         except ApiError as err:
             self._send_api_error(err)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ClientDisconnectedError):
             logger.debug("client disconnected")
         except Exception as ex:  # last resort: never drop the connection without a reply
             logger.exception("unhandled error serving %s", path)
@@ -699,7 +779,9 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
         prompt = raw_prompt if raw_prompt is not None else render_prompt(resolved, messages, tools)
         stack = contextlib.ExitStack()
         try:
-            engine = stack.enter_context(self.manager.use_engine(resolved))
+            engine = stack.enter_context(self.manager.use_engine(resolved, is_alive=lambda: is_connection_alive(self.connection)))
+        except ClientDisconnectedError:
+            raise  # let `_dispatch` swallow it next to BrokenPipeError/ConnectionResetError
         except EngineBusyError as ex:
             raise ApiError(503, f"Server busy: {ex}", "server_error", "server_busy", {"Retry-After": "30"})
         except InsufficientResourcesError as ex:

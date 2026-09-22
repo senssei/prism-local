@@ -164,6 +164,8 @@ One ONNX model is resident at a time, and generation is **serialized behind a lo
 different ONNX model unloads the current one and loads the new one, which takes seconds. Ollama requests are not serialized by
 Prism.
 
+A request that closes its HTTP connection while it is queued behind another caller (waiting for the engine lock) is removed from the queue immediately and never produces a response; the slot it held is freed for the next caller, and the holder is unaffected. The same handling applies to both `/v1/chat/completions` and `/v1/completions` (they share the generation path). Disconnects mid-generation are still detected and stop the generation, as before.
+
 ## Authentication and CORS
 
 See [Security](security.md). With `--api-key`, every endpoint except `/health` requires `Authorization: Bearer <key>`.
