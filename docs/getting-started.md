@@ -61,6 +61,7 @@ actually loads**, and whether Ollama is reachable. Fix anything marked ❌ befor
 | `PRISM_API_KEY` | Bearer token for `prism serve`; also sent by the MCP client and connector probe | unset (no auth) |
 | `OLLAMA_HOST` | Ollama daemon address (`host`, `host:port` or a URL), as in Ollama itself | `http://localhost:11434` |
 | `PRISM_BASE_URL` | Server URL used by `prism mcp` | `http://localhost:5272/v1` |
+| `PRISM_MCP_AUTO_STOP_SEC` | `prism mcp` exits with status 0 after this many seconds without a `tools/call` (a positive float; the timer resets on every call); intended for test harnesses that start the MCP process but never drive it. `0` or unset = no auto-stop. | `0` |
 | `PRISM_QUEUE_TIMEOUT` | Seconds a request may wait for the model before `503` (`0` = forever); same as `prism serve --queue-timeout` | `300` |
 | `PRISM_MAX_QUEUE` | Maximum requests allowed to wait for the engine before immediate `503 server_busy` (`0` = unlimited); same as `prism serve --max-queue` | `8` |
 | `PRISM_RAM_RESERVE_MB` | Host RAM in MB kept free when checking if a model can safely load | `2048` |

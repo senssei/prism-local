@@ -24,9 +24,32 @@ PRISM_DEFAULT_URL = os.environ.get("PRISM_BASE_URL", "http://localhost:5272/v1")
 # and is released after this much idle time so it does not hold VRAM against a `prism serve` started later.
 IDLE_UNLOAD_SEC = 120.0
 
+
+def _resolve_auto_stop_sec() -> float:
+    """`$PRISM_MCP_AUTO_STOP_SEC` (seconds) → float. `0` or unset = disabled; negative → ValueError.
+
+    The MCP process exits via `os._exit(0)` after this many seconds without a `tools/call`,
+    with the timer reset on every successful call. Intended for test harnesses that start
+    `prism mcp` to satisfy editor integrations but never drive it.
+    """
+    raw = os.environ.get("PRISM_MCP_AUTO_STOP_SEC", "").strip()
+    if not raw:
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"PRISM_MCP_AUTO_STOP_SEC must be a number of seconds >= 0 (got '{raw}')")
+    if value < 0:
+        raise ValueError(f"PRISM_MCP_AUTO_STOP_SEC must be a number of seconds >= 0 (got '{raw}')")
+    return value
+
+
+AUTO_STOP_SEC = _resolve_auto_stop_sec()
+
 _catalog_instance: Optional[ModelCatalog] = None
 _manager = None
 _idle_timer: Optional[threading.Timer] = None
+_auto_stop_timer: Optional[threading.Timer] = None
 _state_lock = threading.Lock()
 
 
@@ -58,6 +81,33 @@ def _schedule_idle_unload() -> None:
         _idle_timer = threading.Timer(IDLE_UNLOAD_SEC, _manager.unload)
         _idle_timer.daemon = True
         _idle_timer.start()
+
+
+def _schedule_auto_stop() -> None:
+    """(Re)arm the daemon timer that calls `os._exit(0)` after `AUTO_STOP_SEC` of MCP idle time.
+
+    Independent of `_schedule_idle_unload`: that one only fires after a model has been loaded
+    into this process, so an MCP process that never serves a `tools/call` keeps its startup
+    overhead forever. This timer covers the "started but never driven" case — useful for test
+    harnesses that just need the process to be alive long enough to be discovered.
+    """
+    global _auto_stop_timer
+    if AUTO_STOP_SEC <= 0:
+        return
+    with _state_lock:
+        if _auto_stop_timer is not None:
+            _auto_stop_timer.cancel()
+
+        def _auto_stop() -> None:
+            sys.stderr.write(
+                f"💎 Prism MCP Server: PRISM_MCP_AUTO_STOP_SEC reached ({AUTO_STOP_SEC:g} s); exiting.\n"
+            )
+            sys.stderr.flush()
+            os._exit(0)
+
+        _auto_stop_timer = threading.Timer(AUTO_STOP_SEC, _auto_stop)
+        _auto_stop_timer.daemon = True
+        _auto_stop_timer.start()
 
 
 def _auth_headers(headers: Dict[str, str]) -> Dict[str, str]:
@@ -325,6 +375,7 @@ def run_mcp_server():
     """Main stdio JSON-RPC 2.0 loop."""
     sys.stderr.write("💎 Prism MCP Server starting on stdio...\n")
     sys.stderr.flush()
+    _schedule_auto_stop()  # arm the daemon timer; reset below on every tools/call
 
     for line in sys.stdin:
         line = line.strip()
@@ -363,6 +414,7 @@ def run_mcp_server():
                 "id": req_id,
                 "result": {"tools": handle_list_tools()},
             }
+            _schedule_auto_stop()  # MCP is being driven; reset the idle-stop window
         elif method == "tools/call":
             tool_name = params.get("name", "")
             tool_args = params.get("arguments", {})
@@ -374,6 +426,7 @@ def run_mcp_server():
                     "content": [{"type": "text", "text": output_text}],
                 },
             }
+            _schedule_auto_stop()  # same: a tool call is work the harness is doing
         else:
             if req_id is not None:
                 resp = {

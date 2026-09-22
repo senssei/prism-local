@@ -32,6 +32,9 @@ versions may include breaking changes).
   the call is idempotent (`{"unloaded": bool, "model": string|null}`), and it acquires the engine lock so an in-flight generation finishes before the model is released.
   Useful between benchmark runs of different large models, so each one starts from cold VRAM. Requires the API key when `--api-key` is set; without it, the endpoint is open on
   loopback like every other route.
+- `PRISM_MCP_AUTO_STOP_SEC` (a positive float, seconds): `prism mcp` exits with status 0 after that many seconds without a `tools/call`; the timer resets on every call. Intended
+  for test harnesses that start the MCP process to satisfy editor integrations but never drive it, so the process stops holding its Python/CUDA startup overhead (~1.6 GB VRAM
+  passive) after the run. `0` or unset = no auto-stop (current behaviour). One-line stderr message on exit names the env var so the cause is obvious in a test log.
 
 ### Fixed
 - Tests: WSL config doctor tests in `tests/test_prism_cli.py` now run hermetically on non-WSL Linux environments (`is_wsl_system` honors `PRISM_WSLCONFIG_PATH` and `PRISM_FORCE_WSL=0`).
