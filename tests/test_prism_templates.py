@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from prism.templates import (classify_chat_template, detect_template, flatten_content, format_prompt, jinja_available,
-                             read_chat_template, read_tokenizer_tokens, render_chat_template, render_prompt, resolve_template,
-                             template_mode)
+from prism.templates import (TemplateToolRenderError, classify_chat_template, detect_template, flatten_content, format_prompt,
+                             jinja_available, read_chat_template, read_tokenizer_tokens, render_chat_template, render_prompt,
+                             resolve_template, template_mode)
 
 # Chat templates copied from Microsoft's ONNX Runtime GenAI models (the same files `prism pull` downloads).
 PHI35_TEMPLATE = (
@@ -275,6 +275,46 @@ class TestTemplateModes(ModelFolder):
                 template_mode()
         with patch.dict(os.environ, {"PRISM_TEMPLATE": " JINJA "}):
             self.assertEqual(template_mode(), "jinja")
+
+
+# A template that mentions `tools` (so `supports_tools` will not reject it) but errors at render time when a
+# tool definition is actually present. The `{% if tools %}` guard makes the failure conditional on tools being
+# passed, which is the exact path Prism must NOT silently fall back from. (`raise_exception` is the template-
+# level refusal hook the same way HF templates signal "I refuse this conversation".)
+BROKEN_WITH_TOOLS_TEMPLATE = (
+    "{% if tools %}{{ raise_exception('template does not accept these tool definitions') }}{% endif %}"
+    "{% for m in messages %}{{ m.role }}:{{ m.content }}\n{% endfor %}")
+# A template that raises unconditionally — used to prove the no-tools path still falls back to the built-in
+# format (I7 carve-out: silent fallback is preserved when the caller did not ask for tools).
+ALWAYS_FAILS_TEMPLATE = "{{ raise_exception('boom') }}"
+# A template that takes tools normally; used to prove the new exception is not over-caught.
+GOOD_TOOLS_TEMPLATE = (
+    "{% if tools %}TOOLS={% for t in tools %}{{ t.function.name }}{% endfor %};{% endif %}"
+    "{% for m in messages %}{{ m.role }}:{{ m.content }}\n{% endfor %}")
+TOOL = {"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}
+
+
+@unittest.skipUnless(jinja_available(), "needs the optional jinja2")
+class TestTemplateToolRenderError(ModelFolder):
+    def test_render_prompt_without_tools_still_falls_back_on_template_error(self):
+        # I7 carve-out: when the caller did not ask for tools, a template that fails unconditionally still
+        # falls back to the built-in format (the messages-only path is unchanged).
+        resolved = self.folder(ALWAYS_FAILS_TEMPLATE, "chatml")
+        with self.assertLogs("prism.templates", "WARNING"):
+            self.assertEqual(render_prompt(resolved, CONVERSATION), format_prompt(CONVERSATION, "chatml"))
+
+    def test_render_prompt_with_tools_raises_template_tool_render_error(self):
+        resolved = self.folder(BROKEN_WITH_TOOLS_TEMPLATE, "chatml")
+        with self.assertRaises(TemplateToolRenderError) as ctx:
+            render_prompt(resolved, CONVERSATION, tools=[TOOL])
+        self.assertIsNotNone(ctx.exception.__cause__)
+        self.assertIn("m", str(ctx.exception))  # model id (resolved["id"] == "m")
+
+    def test_render_prompt_with_tools_returns_prompt_when_template_accepts_tools(self):
+        # The new exception must not fire on templates that take tools normally; guard against over-catching.
+        resolved = self.folder(GOOD_TOOLS_TEMPLATE, "chatml")
+        out = render_prompt(resolved, CONVERSATION, tools=[TOOL])
+        self.assertIn("TOOLS=get_weather;", out)
 
 
 if __name__ == "__main__":

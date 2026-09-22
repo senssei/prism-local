@@ -133,6 +133,13 @@ class TemplateError(ValueError):
     """A chat template rejected the conversation (its own `raise_exception`, or a construct the sandbox forbids)."""
 
 
+class TemplateToolRenderError(TemplateError):
+    """A chat template raised while being rendered with a non-empty `tools` argument. Prism does not silently
+    fall back to the built-in format in this case, because that would drop the caller's tool definitions and
+    hand the model a prompt without them — a silent change in behaviour. The HTTP layer surfaces this as
+    `400 template_render_failed`."""
+
+
 @functools.lru_cache(maxsize=1)
 def _jinja_env():
     from jinja2.sandbox import ImmutableSandboxedEnvironment
@@ -191,8 +198,17 @@ def render_chat_template(text: str, messages: List[Dict[str, Any]], *, bos_token
 
 def render_prompt(resolved: Dict[str, Any], messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> str:
     """The prompt for `messages` on the model `resolved` (a catalog entry): its own Jinja chat template when it has one and jinja2
-    is installed, else Prism's built-in format for the detected family. A template that fails is logged and replaced by the
-    built-in format, which is more forgiving (it folds a system prompt into a user turn where the template refuses one)."""
+    is installed, else Prism's built-in format for the detected family.
+
+    When `tools is None`, a template that fails (its own `raise_exception`, a forbidden sandbox construct, etc.)
+    is logged and replaced by the built-in format — invariant I7. The built-in format renders the same
+    conversation without the template's peculiarities (it folds a system prompt into a user turn where the
+    template refuses one).
+
+    When `tools is not None`, a template that fails raises `TemplateToolRenderError` instead of falling back.
+    The built-in format has no `tools` argument and would silently drop the caller's tool definitions, which is
+    a silent change in what the model sees. The HTTP layer converts the exception to `400 template_render_failed`
+    (spec.md P11)."""
     builtin = lambda: format_prompt(messages, resolved.get("template"))  # noqa: E731
     mode = template_mode()
     path = resolved.get("path")
@@ -210,6 +226,13 @@ def render_prompt(resolved: Dict[str, Any], messages: List[Dict[str, Any]], tool
         out = render_chat_template(text, [{**m, "content": flatten_content(m.get("content"))} for m in messages],
                                    bos_token=bos, eos_token=eos, tools=tools)
     except Exception as ex:
+        # When the caller passed tools, do NOT fall back to the built-in format — it has no `tools` argument and
+        # would silently drop the tool definitions from the prompt. The server surfaces this as 400
+        # `template_render_failed` (spec.md P11). The no-tools case keeps the silent fallback (I7 carve-out: the
+        # built-in format renders the same conversation, so the caller has no idea anything changed).
+        if tools:
+            raise TemplateToolRenderError(
+                f"chat template of {resolved.get('id')!r} failed to render with tools: {ex}") from ex
         logger.warning("chat template of %s failed (%s); using the built-in '%s' format", resolved.get("id"), ex,
                        resolved.get("template"))
         return builtin()

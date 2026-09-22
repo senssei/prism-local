@@ -84,6 +84,32 @@ Tests and reviews cite these by number. Changing one needs operator approval.
   - **Failure modes**: no new HTTP status. The peer is gone, so there is no response to write. Disconnect during the *lock-acquire* poll is silent (debug log). Disconnect detected *after* acquire but before generation starts releases the lock and is silent. Disconnect detected *during* generation still surfaces as a `BrokenPipeError` on the next `wfile.write` and is caught as today. The existing `503 server_busy` row is unchanged: a peer that is still connected but waited too long still gets the same `503` with `Retry-After: 30`.
   - **Configuration**: no new flag, no new environment variable. `--queue-timeout` keeps its meaning for callers that are connected; `--max-queue` keeps its meaning for callers that are connected.
 
+### Phase 7: No silent tool-drop on chat-template render failure (`plan.md` Phase 7)
+
+- **P11 No silent tool-drop on render failure**: when a chat completion request carries `tools` and the model's Jinja
+  chat template raises during `render_chat_template(text, messages, tools=tools)` (e.g. the template references a
+  field the caller's tool definitions do not provide), Prism no longer falls back to the built-in `format_prompt`,
+  which has no `tools` argument and would silently hand the model a prompt without the tool definitions. The failure
+  now surfaces as `400 invalid_request_error` with `error.code = "template_render_failed"` and a `message` naming
+  the model id and the underlying jinja/template exception.
+  - **Why**: a silent fallback that drops a request's `tools` argument is a silent change to what the model sees
+    (`intent.md` §3.3 calls a silent fallback a bug; the same principle applies here — the caller asked for tools
+    and got none without warning).
+  - **Scope**: ONNX backend only; Ollama handles tools itself and does not call `render_prompt` for tool placement.
+  - **No-tools case**: unchanged. When `tools is None`, the existing "log and fall back to the built-in format"
+    path stays (invariant I7 still applies — a template that fails on the messages alone is harmless, the built-in
+    format renders the same conversation).
+  - **Where the check fires**: `_dispatch` already turns `ApiError` into the JSON error body, so the natural place
+    to convert the new exception is the single call to `render_prompt(resolved, messages, tools)` in `_generate`
+    (`prism/server.py`). Other callers of `render_prompt` (`cli.py`, `chat.py`, `mcp.py`, `benchmark.py`) do not
+    pass `tools`, so the no-tools path is unchanged for them.
+  - **Failure modes**: `400 template_render_failed` with `error.message` naming the model id and the underlying
+    jinja/template exception text. No `5xx`; the failure is a client-side issue (the template does not accept the
+    provided tool definitions), not a server fault. The engine lock is released by `ActiveEngineManager.use_engine`
+    on the way out, so no slot is held.
+  - **Docs**: `docs/api.md` Errors table gets a row for `template_render_failed`. `CHANGELOG.md` `[Unreleased]`
+    gets a `### Changed` entry.
+
 ### Implemented (Phase 1: Parallel use must not exhaust the machine)
 
 - **P1 Resource budget** (`prism/resources.py`): before an ONNX model is loaded, `check_can_load(model_path, device)` compares free

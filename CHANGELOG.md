@@ -14,6 +14,7 @@ versions may include breaking changes).
 - ONNX sampling: `temperature` and `top_p` now take effect. Most `genai_config.json` files say `top_k: 1`, and with that ONNX Runtime GenAI ignores both, so every
   request was greedy (Phi-4-mini at temperature 1.5: 1 distinct output in 4 runs before, 4 in 4 now). When sampling, `top_k` is the model's own value if above 1, else 40.
 - Queue slot is released when the HTTP client disconnects while waiting for the engine lock: `ActiveEngineManager.use_engine` now accepts an `is_alive` callback and poll-iterates with a 50 ms tick, so a gone peer no longer holds a slot for the full `--queue-timeout` (default 300 s). The check uses `recv(1, MSG_PEEK)` with the socket temporarily set non-blocking; no new flag, no new environment variable. Disconnects mid-generation are still handled as before.
+- Chat-template render failure with tools no longer falls back silently to the built-in format (which would drop the caller's tool definitions). `/v1/chat/completions` now returns `400 template_render_failed` instead, naming the model id and the underlying jinja/template exception text. The no-tools path keeps the silent fallback (I7).
 
 ### Added
 - Reasoning separation: `prism.reasoning` module extracting `<think>...</think>` blocks into `message.reasoning_content` (and streaming `delta.reasoning_content`) for OpenAI-compatible `/v1/chat/completions` across ONNX and Ollama backends, while keeping raw output intact for legacy `/v1/completions`.

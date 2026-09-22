@@ -27,7 +27,7 @@ from prism.ollama_bridge import embed_ollama, stream_ollama_chat
 from prism.reasoning import extract_reasoning, stream_reasoning
 from prism.resources import InsufficientResourcesError
 from prism.telemetry import get_gpu_info
-from prism.templates import flatten_content, render_prompt, supports_tools
+from prism.templates import TemplateToolRenderError, flatten_content, render_prompt, supports_tools
 from prism.tools import arguments_as_objects, parse_tool_calls, to_openai_tool_calls
 
 logger = logging.getLogger("prism.server")
@@ -776,7 +776,19 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             content, calls = parse_tool_calls(text)
             return (content, "tool_calls", to_openai_tool_calls(calls)) if calls else (text, finish, None)
 
-        prompt = raw_prompt if raw_prompt is not None else render_prompt(resolved, messages, tools)
+        try:
+            prompt = raw_prompt if raw_prompt is not None else render_prompt(resolved, messages, tools)
+        except TemplateToolRenderError as ex:
+            # The chat template raised while rendering with the caller's tool definitions. The built-in format
+            # has no `tools` argument and would silently drop them — a silent change in what the model sees
+            # (spec.md P11). The engine has not been acquired yet (this runs before the lock is entered), so a
+            # 400 here holds no slot and loads no model. The message carries `str(ex)` (model id + underlying
+            # template/jinja text) so the caller can act on the specific field of the tool definition that
+            # tripped the template; the static second sentence names the behaviour change so it is findable
+            # in logs.
+            logger.warning("%s", ex)
+            raise ApiError(400, f"{ex} Prism does not silently drop tools from the prompt.",
+                           code="template_render_failed") from ex
         stack = contextlib.ExitStack()
         try:
             engine = stack.enter_context(self.manager.use_engine(resolved, is_alive=lambda: is_connection_alive(self.connection)))

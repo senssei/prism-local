@@ -938,6 +938,39 @@ class TestToolsRejected(ServerTestBase):
         self.assertEqual(resp.status, 200)
 
 
+@unittest.skipUnless(jinja_available(), "tool calling on ONNX models needs the optional jinja2")
+class TestToolTemplateFailure(ServerTestBase):
+    """P11 (spec.md): when a chat template mentions `tools` (so `supports_tools` says True) but the render raises
+    on a real tool definition, Prism returns `400 template_render_failed` instead of silently dropping the tools.
+    The no-tools case still falls back to the built-in format (I7 carve-out)."""
+
+    def setUp(self):
+        super().setUp()
+        d = make_model(self.tmp, "broken-tool-model", "qwen2")
+        # Template mentions `tools` (so `supports_tools` returns True) but errors when actually rendered with a
+        # tool definition. Mirrors `BROKEN_WITH_TOOLS_TEMPLATE` in `tests/test_prism_templates.py`.
+        with open(os.path.join(d, "tokenizer_config.json"), "w") as f:
+            json.dump({"chat_template":
+                       "{% if tools %}{{ raise_exception('template does not accept these tool definitions') }}"
+                       "{% endif %}{% for m in messages %}{{ m.role }}:{{ m.content }}\n{% endfor %}"}, f)
+
+    def test_template_failure_with_tools_returns_400_template_render_failed(self):
+        resp, data = self.chat(model="broken-tool-model", tools=[WEATHER_TOOL])
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(data["error"]["code"], "template_render_failed")
+        # The spec says the message names the model id AND the underlying template/jinja exception text so the
+        # caller can act on the specific field that tripped the template (spec.md P11, Failure modes).
+        self.assertIn("broken-tool-model", data["error"]["message"])
+        self.assertIn("template does not accept these tool definitions", data["error"]["message"])
+        self.assertEqual(FakeEngine.prompts, [])  # the engine was never loaded
+
+    def test_template_failure_without_tools_still_returns_200_via_builtin_fallback(self):
+        # I7 carve-out: the same template, no tools — the `{% if tools %}` guard short-circuits, so the template
+        # renders fine, and the response is 200 with the built-in format underneath.
+        resp, _ = self.chat(model="broken-tool-model")
+        self.assertEqual(resp.status, 200)
+
+
 class TestEmbeddings(ServerTestBase):
     def setUp(self):
         super().setUp()
