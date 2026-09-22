@@ -41,6 +41,7 @@ curl -s http://127.0.0.1:5272/v1/chat/completions -H 'Content-Type: application/
 | `POST /v1/embeddings` | Embeddings, **Ollama models only** (see [Embeddings](#embeddings)) |
 | `POST /v1/completions` | Legacy text completion. ONNX models get the raw prompt (no chat template). Ollama models get it as one user message. |
 | `POST /v1/unload` | Drop the ONNX model held by the server, freeing its VRAM/RAM. Idempotent; see [Unload](#unload). |
+| `POST /v1/drain` | Finish the in-flight request, unload the model, and exit the server with status 0. Lets an orchestrator replace the running `prism serve` with a different model on the same GPU; see [Drain](#drain). |
 | `GET /health` (also `/v1/health`, `/v1/status`) | Status, `active_model`, `active_device` (`cuda`/`cpu`/`null` when nothing is loaded) and GPU telemetry. **No auth required.** |
 
 Trailing slashes are accepted.
@@ -138,6 +139,33 @@ The body is optional (`{}` if absent) and any JSON object is accepted and ignore
 waits for it to finish — the HTTP call is synchronous and may take seconds. Ollama models are not loaded into the server
 process and are unaffected. Loading a different model after `unload()` re-runs the resource-budget check ([Concurrency](#concurrency)).
 
+## Drain
+
+`POST /v1/drain` tells the running `prism serve` to finish its current request, unload the model, and exit with status
+0. Use it from a benchmark or evaluation orchestrator that needs a different model on the same GPU: drain the active
+server, start a fresh one, swap back when done. The engine lock waits for the in-flight generation to complete; the
+HTTP response is sent first; the process exits through `os._exit(0)` ~250 ms later so the response can flush.
+
+```bash
+curl -s -X POST http://127.0.0.1:5272/v1/drain \
+  -H 'Authorization: Bearer YOUR_KEY'      # only when --api-key is set
+```
+
+The body is optional (`{}` if absent) and any JSON object is accepted and ignored (reserved for a future
+`timeout_ms`). A non-empty body that is not a JSON object returns `400`. The reply is:
+
+```json
+{"drained": true, "model": "phi-4-mini", "exit_in_ms": 250}
+```
+
+`drained` is `true` when a model was resident and is now released, `false` otherwise; `model` is the id of the released
+model (`null` when nothing was loaded); `exit_in_ms` is the delay before `os._exit(0)`. After `drained: true` the
+process is on its way out — do not issue further requests to it.
+
+`POST /v1/drain` is the orchestrator's partner to the `error.holder` field on `503 insufficient_resources`. When the
+orchestrator sees that field, it knows which running `prism serve` is holding VRAM; `POST /v1/drain` to that
+process frees the GPU so the orchestrator can start its own server with the larger model.
+
 ## Errors
 
 All errors are JSON: `{"error": {"message", "type", "param", "code"}}`.
@@ -154,7 +182,7 @@ All errors are JSON: `{"error": {"message", "type", "param", "code"}}`.
 | 403 | `host_not_allowed` | Non-loopback `Host` header on a loopback bind |
 | 404 | `model_not_found` / `not_found` | Unknown model / unknown route |
 | 413 | `body_too_large` | Body over 10 MB |
-| 503 | `insufficient_resources` | Host RAM or GPU VRAM is insufficient to load the model safely; carries `Retry-After: 30` |
+| 503 | `insufficient_resources` | Host RAM or GPU VRAM is insufficient to load the model safely; carries `Retry-After: 30`. When the model-load lock is held by another process, `error.holder` (`{"pid", "model"}`) names it; see [Drain](#drain) for the orchestrator pattern |
 | 503 | `server_busy` | The model stayed busy with other requests longer than `--queue-timeout`, or waiting queue exceeded `--max-queue` (default 8); carries `Retry-After: 30` |
 | 500 | `model_load_failed` | The ONNX model could not be loaded, for example `--device cuda` with a broken CUDA setup |
 | 502 | `backend_unavailable` | Ollama is unreachable or failed |

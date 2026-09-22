@@ -110,6 +110,46 @@ Tests and reviews cite these by number. Changing one needs operator approval.
   - **Docs**: `docs/api.md` Errors table gets a row for `template_render_failed`. `CHANGELOG.md` `[Unreleased]`
     gets a `### Changed` entry.
 
+### Phase 8: Drain endpoint and structured holder detail (`plan.md` Phase 8)
+
+- **P12 Drain the server and structured holder info**:
+  - **`POST /v1/drain`** asks the running `prism serve` to finish its current request (the engine lock waits for the
+    in-flight generation), unload the ONNX model, and exit with status 0. The HTTP response is sent first; the
+    process exits through `os._exit(0)` on a daemon thread ~250 ms later so the response can be flushed. The
+    response body is `{"drained": bool, "model": str|null, "exit_in_ms": int}`. Idempotent (no model → `drained:
+    false, model: null, exit_in_ms: 250`).
+    - **Why**: a benchmarking or evaluation tool that needs a different model on the same VRAM cannot ask a
+      running `prism serve` to step aside today. `POST /v1/unload` releases the model but keeps the server alive,
+      so the bench would still hit the same process on the next request. `POST /v1/drain` lets the orchestrator
+      replace the server (e.g. start its own `prism serve` with a large model, run the eval, restart the original
+      if needed). Stdlib-only (`os._exit`, `threading.Timer`).
+    - **Auth**: same as `/v1/unload` (default: loopback open; `--api-key` makes it `Bearer`-required).
+    - **Request body**: optional. `Content-Length: 0` (or absent) → `{}`. Any JSON object is accepted and ignored
+      today (reserved for a future `timeout_ms`). A non-empty body that is not a JSON object → `400`.
+    - **Failure modes**: `400 invalid_request_error` for a non-empty non-object body or invalid
+      `Content-Length`; `401 invalid_api_key` when the bearer does not match `--api-key`; `404 not_found` for any
+      other path. Non-`POST` methods inherit the stdlib behaviour (`GET /v1/drain` → `404`, other → `501`). No
+      new state on the server, no new environment variable, no new CLI flag.
+    - **Interaction with the engine queue**: a drain waits for the current `use_engine` context to exit
+      (`manager.unload()` already holds the engine lock; the next request that arrives in the 250 ms window
+      before `os._exit(0)` enters `_generate`, sees `manager.engine is None`, and starts a fresh model load
+      that is interrupted mid-flight when `os._exit(0)` fires. The dropped request sees a TCP reset or a partial
+      response. The 250 ms window is sized for a TCP close handshake, not for new requests — clients must
+      treat the drain reply as the last response they will see from this server).
+    - **Docs**: `docs/api.md` adds the route to the routing table and the endpoint to the Errors / Endpoints
+      table. `docs/devices.md` "Parallel use" gets a short paragraph on the orchestrator pattern. `CHANGELOG.md`
+      `[Unreleased]` gets a `### Added` entry.
+  - **`error.holder` on `503 insufficient_resources`**: when the model load lock is held by another process, the
+    `503` JSON now carries a structured `error.holder = {"pid": int, "model": str}` in addition to the existing
+    prose in `error.message` (which stays — logs and humans still parse it). The shape matches the on-disk lock
+    metadata (`prism/machine_lock.py::_read_holder_info`). When no holder is recorded, `error.holder` is omitted
+    (not `null`), so the orchestrator's `if "holder" in error:` is the right check. Same auth, same `Retry-After:
+    30`, same `code: "insufficient_resources"`. No new files; the change is in `prism/server.py`
+    (`ApiError.__init__` accepts `holder: Optional[Dict[str, Any]]`, `_send_api_error` includes it when set; the
+    `InsufficientResourcesError` handler reads `_read_holder_info()` and passes the dict). `docs/api.md` Errors
+    table row for `503 insufficient_resources` documents the new field. `CHANGELOG.md` `[Unreleased]` gets a
+    `### Changed` entry.
+
 ### Implemented (Phase 1: Parallel use must not exhaust the machine)
 
 - **P1 Resource budget** (`prism/resources.py`): before an ONNX model is loaded, `check_can_load(model_path, device)` compares free

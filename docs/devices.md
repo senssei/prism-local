@@ -161,3 +161,16 @@ autoMemoryReclaim=gradual
 
 `prism doctor` inspects `.wslconfig` and reports whether these safety limits are active. Prism never modifies `.wslconfig`.
 5. **Thread control (`PRISM_THREADS`)**: By default, ONNX Runtime allocates internal thread pools based on CPU core count. When running alongside heavy host workloads or in shared environments, set `PRISM_THREADS` (a positive integer, e.g. `PRISM_THREADS=4`) to restrict intra-op parallelism and avoid CPU saturation during token generation.
+6. **Orchestrator drain (`POST /v1/drain`)**: A benchmark or evaluation tool that needs a different model on the same GPU can ask the running `prism serve` to step aside. The flow:
+
+```bash
+# 1. Drain the active server (finishes the in-flight request, unloads the model, exits with status 0).
+curl -s -X POST http://127.0.0.1:5272/v1/drain
+
+# 2. Start your own prism serve that owns the GPU until you are done.
+prism serve --device cuda --model <the-model-you-need>
+
+# 3. (Optional) restart the previous server when you are done — it was already shut down by the drain.
+```
+
+When the orchestrator's request is blocked by a holder, the `503 insufficient_resources` response carries `error.holder = {"pid", "model"}` so the orchestrator can target the right `prism serve` instance. See [Drain in the API reference](api.md#drain).

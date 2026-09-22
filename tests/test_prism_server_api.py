@@ -1,7 +1,10 @@
 import http.client
 import json
 import os
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -362,6 +365,190 @@ class TestUnloadAuth(ServerTestBase):
         resp, data = self.request("POST", "/v1/unload",
                                   headers={"Authorization": "Bearer s3cret"})
         self.assertEqual((resp.status, data), (200, {"unloaded": False, "model": None}))
+
+
+class TestDrain(ServerTestBase):
+    """P12 (spec.md): `POST /v1/drain` finishes the in-flight work, unloads the model, and exits the process."""
+
+    def test_drain_with_no_model_returns_200_and_exit_marker(self):
+        with patch("prism.server.os._exit") as exit_mock, \
+             patch("prism.server.threading.Timer") as timer_mock:
+            resp, data = self.request("POST", "/v1/drain")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(data["drained"], False)
+        self.assertIsNone(data["model"])
+        self.assertEqual(data["exit_in_ms"], 250)
+        # The Timer was created with the right delay and target.
+        timer_mock.assert_called_once()
+        args, kwargs = timer_mock.call_args
+        self.assertEqual(args[0], 0.25)
+        self.assertEqual(args[1], exit_mock)
+        # `args=(0,)` is passed as a keyword arg to Timer; it becomes the (0,) tuple forwarded to os._exit.
+        self.assertEqual(kwargs.get("args"), (0,))
+        timer_mock.return_value.start.assert_called_once()
+
+    def test_drain_after_a_chat_request_unloads_and_reports_model(self):
+        self.chat()  # loads "qwen-coder-gpu" via FakeEngine
+        self.assertEqual(self.manager.current_model_id, "qwen-coder-gpu")
+        with patch("prism.server.os._exit") as exit_mock, \
+             patch("prism.server.threading.Timer") as timer_mock:
+            resp, data = self.request("POST", "/v1/drain")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(data["drained"], True)
+        self.assertEqual(data["model"], "qwen-coder-gpu")
+        self.assertEqual(data["exit_in_ms"], 250)
+        self.assertIsNone(self.manager.current_model_id)
+        timer_mock.assert_called_once()
+        timer_mock.return_value.start.assert_called_once()
+
+    def test_drain_with_empty_body_succeeds(self):
+        with patch("prism.server.os._exit"), patch("prism.server.threading.Timer"):
+            resp, data = self.request("POST", "/v1/drain")
+        self.assertEqual(resp.status, 200)
+
+    def test_drain_with_json_object_body_succeeds_and_ignores_the_body(self):
+        with patch("prism.server.os._exit"), patch("prism.server.threading.Timer"):
+            resp, data = self.request("POST", "/v1/drain", {"reason": "benchrig"})
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(data["drained"], False)
+
+    def test_drain_with_non_object_body_returns_400(self):
+        # Review finding: a `threading.Timer` scheduled on the 400 path would `os._exit(0)` after returning the
+        # error — a correctness regression. Patch `threading.Timer` and assert it was never called.
+        with patch("prism.server.threading.Timer") as timer_mock:
+            resp, data = self.request("POST", "/v1/drain", ["not", "an", "object"])
+        timer_mock.assert_not_called()
+        self.assertEqual(resp.status, 400)
+        self.assertIn("object", data["error"]["message"])
+
+    def test_drain_wrong_path_returns_404(self):
+        resp, _ = self.request("POST", "/v1/not_drain")
+        self.assertEqual(resp.status, 404)
+
+    def test_drain_get_returns_404(self):
+        resp, _ = self.request("GET", "/v1/drain")
+        self.assertEqual(resp.status, 404)
+
+
+class TestDrainAuth(ServerTestBase):
+    api_key = "s3cret"
+
+    def test_drain_without_api_key_returns_401(self):
+        resp, data = self.request("POST", "/v1/drain")
+        self.assertEqual((resp.status, data["error"]["code"]), (401, "invalid_api_key"))
+
+    def test_drain_with_correct_api_key_succeeds(self):
+        with patch("prism.server.os._exit"), patch("prism.server.threading.Timer"):
+            resp, data = self.request("POST", "/v1/drain",
+                                      headers={"Authorization": "Bearer s3cret"})
+        self.assertEqual(resp.status, 200)
+
+
+@unittest.skipUnless(shutil.which("git"), "needs git")  # the subprocess test is heavy; keep it portable
+class TestDrainProcessExit(unittest.TestCase):
+    """Phase 8 review: a real subprocess must actually exit with status 0 after `POST /v1/drain`. The mock-based
+    tests in `TestDrain` verify the call site; this one verifies the actual behaviour the feature is named for."""
+
+    _PYTHON = sys.executable
+
+    def _spawn_serve(self, extra_env=None):
+        env = os.environ.copy()
+        # Sandbox: don't leak the parent's ollama URLs, telemetry env, etc.
+        for k in ("PRISM_BASE_URL", "PRISM_API_KEY", "PRISM_MAX_QUEUE", "PRISM_QUEUE_TIMEOUT",
+                  "PRISM_LOAD_TIMEOUT", "PRISM_RESOURCE_CHECK", "PRISM_VRAM_RESERVE_MB",
+                  "PRISM_RAM_RESERVE_MB", "PRISM_DEVICE"):
+            env.pop(k, None)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.Popen(
+            [self._PYTHON, "-u", "-m", "prism.cli", "serve", "--port", "0", "--host", "127.0.0.1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        )
+
+    def _read_port(self, proc, timeout=10):
+        # `start_server` prints "🚀 prism OpenAI Server active at http://127.0.0.1:<port>/v1" to stdout.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                stderr = proc.stderr.read().decode("utf-8", "replace")
+                self.fail(f"prism serve exited before announcing a port; stderr: {stderr}")
+            match = re.search(rb"http://127\.0\.0\.1:(\d+)/v1", line)
+            if match:
+                return int(match.group(1))
+        self.fail("prism serve did not print a listening URL within timeout")
+
+    def test_drain_process_actually_exits_with_status_zero(self):
+        proc = self._spawn_serve()
+        try:
+            port = self._read_port(proc)
+            # Drive the drain. The handler schedules `os._exit(0)` ~250 ms after the response is sent; the
+            # subprocess should exit within ~3 s total.
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("POST", "/v1/drain")
+            resp = conn.getresponse()
+            body = resp.read()
+            conn.close()
+            self.assertEqual(resp.status, 200)
+            data = json.loads(body)
+            self.assertEqual(data["drained"], False)
+            self.assertEqual(data["model"], None)
+            self.assertEqual(data["exit_in_ms"], 250)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                self.fail("prism serve did not exit within 3 s of /v1/drain")
+            self.assertEqual(proc.returncode, 0, f"expected status 0, got {proc.returncode}")
+        finally:
+            # Drain the pipes so the subprocess does not block on a full pipe buffer and we do not leak fds.
+            for stream in (proc.stdout, proc.stderr):
+                try:
+                    stream.read()
+                except Exception:
+                    pass
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        self.assertEqual(data["drained"], False)
+
+
+class TestInsufficientResourcesHolder(ServerTestBase):
+    """P12 (spec.md): `503 insufficient_resources` carries `error.holder` when the model-load lock is held."""
+
+    def test_503_insufficient_resources_carries_error_holder_when_lock_held(self):
+        from prism.resources import InsufficientResourcesError
+        from prism import server as server_mod
+        # The real lock-file writer (`prism/machine_lock.py:91`) writes `{"pid", "model", "time"}` — three keys.
+        # The contract documents two keys (`{"pid", "model"}`); the server must project to the documented shape and
+        # not leak `time`. This is a review finding from Phase 8.
+        holder_raw = {"pid": 481017, "model": "v2", "time": 1763873000.0}
+        # The exception carries the holder in prose (this is what `check_can_load` does in production when the lock
+        # is held); the server side reads the structured holder via `_read_holder_info` and emits both.
+        ex = InsufficientResourcesError(
+            "Insufficient VRAM to load model: 7999.3 MB free < 13380.0 MB required. Held by PID 481017 (loading 'v2').")
+        with patch.object(server_mod, "_read_holder_info", return_value=holder_raw), \
+             patch.object(self.manager, "use_engine", side_effect=ex):
+            resp, data = self.chat()
+        self.assertEqual(resp.status, 503)
+        self.assertEqual(data["error"]["code"], "insufficient_resources")
+        # error.holder is the documented 2-key shape; the `time` field is stripped.
+        self.assertEqual(data["error"].get("holder"), {"pid": 481017, "model": "v2"})
+        # error.message still mentions the holder in prose, for logs and humans.
+        self.assertIn("Held by PID 481017", data["error"]["message"])
+
+    def test_503_insufficient_resources_omits_error_holder_when_no_lock(self):
+        from prism.resources import InsufficientResourcesError
+        from prism import server as server_mod
+        with patch.object(server_mod, "_read_holder_info", return_value={}), \
+             patch.object(self.manager, "use_engine", side_effect=InsufficientResourcesError("RAM shortage")):
+            resp, data = self.chat()
+        self.assertEqual(resp.status, 503)
+        self.assertEqual(data["error"]["code"], "insufficient_resources")
+        # No holder → field omitted (not null), so an orchestrator's `if "holder" in data["error"]` is the check.
+        self.assertNotIn("holder", data["error"])
 
 
 class TestStreamUsage(ServerTestBase):

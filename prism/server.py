@@ -25,6 +25,8 @@ from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from prism.engine import Engine, OnnxGenAiEngine
 from prism.ollama_bridge import embed_ollama, stream_ollama_chat
 from prism.reasoning import extract_reasoning, stream_reasoning
+from prism.machine_lock import _read_holder_info
+from prism.paths import state_dir
 from prism.resources import InsufficientResourcesError
 from prism.telemetry import get_gpu_info
 from prism.templates import TemplateToolRenderError, flatten_content, render_prompt, supports_tools
@@ -223,13 +225,15 @@ ENGINE_MANAGER = ActiveEngineManager()
 
 class ApiError(Exception):
     def __init__(self, status: int, message: str, err_type: str = "invalid_request_error", code: Optional[str] = None,
-                 headers: Optional[Dict[str, str]] = None):
+                 headers: Optional[Dict[str, str]] = None,
+                 holder: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.status = status
         self.message = message
         self.err_type = err_type
         self.code = code
         self.headers = headers or {}
+        self.holder = holder
 
 
 class PrismHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -460,9 +464,10 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_api_error(self, err: ApiError):
-        self._send_json(err.status, {
-            "error": {"message": err.message, "type": err.err_type, "param": None, "code": err.code}
-        }, err.headers)
+        body: Dict[str, Any] = {"message": err.message, "type": err.err_type, "param": None, "code": err.code}
+        if err.holder is not None:
+            body["holder"] = err.holder
+        self._send_json(err.status, {"error": body}, err.headers)
 
     def _check_host(self):
         """Rejects foreign Host headers on loopback binds (DNS-rebinding defence)."""
@@ -546,6 +551,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             "/v1/completions": self._handle_completions,
             "/v1/embeddings": self._handle_embeddings,
             "/v1/unload": self._handle_unload,
+            "/v1/drain": self._handle_drain,
         })
 
     def _handle_list_models(self):
@@ -598,6 +604,37 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                     raise ApiError(400, "JSON body must be an object")
         previous = self.manager.unload()
         self._send_json(200, {"unloaded": previous is not None, "model": previous})
+
+    def _handle_drain(self):
+        """P12: finish the in-flight work, unload the model, and exit with status 0.
+
+        The engine lock (`manager.unload()`) waits for the current `use_engine` context to exit, so any request that
+        was running finishes first. The HTTP response is sent before the process exits; a daemon `threading.Timer`
+        calls `os._exit(0)` ~250 ms later to flush the response. The body is optional (`{}` if absent) and, when
+        present, must be a JSON object — reserved for future options (e.g. `timeout_ms`).
+        """
+        raw_len = self.headers.get("Content-Length")
+        if raw_len is not None:
+            try:
+                length = int(raw_len)
+            except ValueError:
+                raise ApiError(400, "Invalid Content-Length")
+            if length < 0:
+                raise ApiError(400, "Invalid Content-Length")
+            if length > MAX_BODY_BYTES:
+                raise ApiError(413, f"Request body exceeds {MAX_BODY_BYTES} bytes", code="body_too_large")
+            if length > 0:
+                try:
+                    body = json.loads(self.rfile.read(length).decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    raise ApiError(400, "Invalid JSON payload")
+                if not isinstance(body, dict):
+                    raise ApiError(400, "JSON body must be an object")
+        previous = self.manager.unload()
+        self._send_json(200, {"drained": previous is not None, "model": previous, "exit_in_ms": 250})
+        # Schedule the exit after the response has been flushed. Daemon so it does not block interpreter shutdown;
+        # `os._exit` does not run atexit handlers anyway, so a daemon thread is the right primitive here.
+        threading.Timer(0.25, os._exit, args=(0,)).start()
 
     # ------------------------------------------------------------------ inference
 
@@ -797,7 +834,15 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
         except EngineBusyError as ex:
             raise ApiError(503, f"Server busy: {ex}", "server_error", "server_busy", {"Retry-After": "30"})
         except InsufficientResourcesError as ex:
-            raise ApiError(503, f"Insufficient resources to load model '{model_id}': {ex}", "server_error", "insufficient_resources", {"Retry-After": "30"})
+            holder_info = _read_holder_info(state_dir() / "load.lock")
+            # Project to the documented 2-key shape (`{"pid", "model"}`). The lock-file writer also stores `time`
+            # for diagnostics (`prism/machine_lock.py:91`); that is operational metadata, not part of the public
+            # contract, so we strip it here. A `pid` without a `model` (a future-proofing concern raised by review)
+            # still passes the dict through as-is — the lock writer always sets both keys today.
+            holder = ({"pid": holder_info["pid"], "model": holder_info.get("model")}
+                      if holder_info.get("pid") else None)
+            raise ApiError(503, f"Insufficient resources to load model '{model_id}': {ex}", "server_error",
+                           "insufficient_resources", {"Retry-After": "30"}, holder=holder)
         except Exception as ex:
             logger.exception("failed to load model %s", resolved.get("id"))
             raise ApiError(500, f"Failed to load model '{model_id}': {ex}", "server_error", "model_load_failed")
