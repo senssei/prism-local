@@ -150,6 +150,48 @@ Tests and reviews cite these by number. Changing one needs operator approval.
     table row for `503 insufficient_resources` documents the new field. `CHANGELOG.md` `[Unreleased]` gets a
     `### Changed` entry.
 
+### Phase 9: Graceful shutdown during in-flight SSE responses (`plan.md` Phase 9)
+
+- **P13 Graceful shutdown while a streamed response is in flight**:
+  - When `prism serve` is interrupted (Ctrl+C / SIGTERM with default handler; `POST /v1/drain` is its own path,
+    covered by P12), the server prints `Shutting down server...`, waits for the in-flight generation under the
+    engine lock (`manager.unload()`), and exits `0` once `with server:` closes the listening socket.
+  - `OpenAIApiHandler._begin_sse`, `_sse`, `_sse_error`, the streaming loops in `_generate` / `_generate_ollama`,
+    and the JSON helper `_send_json` (plus the CORS preflight `do_OPTIONS`) must not raise an unhandled exception
+    when the HTTP connection is closed by shutdown underneath them:
+    - `send_response`, `send_header`, `end_headers` and `wfile.write` calls sit inside
+      `try/except (OSError, ValueError)` (the implementation is a single helper,
+      `OpenAIApiHandler._safe_write`). Hits are logged at debug, the response is dropped, no synthetic `5xx` is
+      written (headers may already be gone or the next write would fail anyway). `OSError` covers
+      `BrokenPipeError`, `ConnectionResetError`, and `EBADF`; `ValueError` covers the `BufferedWriter` "I/O
+      operation on closed file." case that is not an `OSError` subclass.
+    - The streaming loops' existing `(BrokenPipeError, ConnectionResetError)` clauses widen to the same
+      `(OSError, ValueError)` tuple. `_sse` re-raises `ConnectionResetError` when its write was swallowed so the
+      streaming loops' existing catch aborts generation as before — the loop does not run the engine to completion
+      with no reader.
+    - `_dispatch`'s `(BrokenPipeError, ConnectionResetError, ClientDisconnectedError)` catch is **deliberately
+      not** widened to four classes: a handler may legitimately raise `OSError` / `ValueError` from its own
+      logic (file paths, int parsing, …) and those must reach the `except Exception` branch, not be silently
+      treated as "client disconnected". I/O failures the response writers raise are pre-empted at the point of
+      the failing write.
+  - Failure modes:
+    - Client disconnects between dispatch and `_begin_sse` → no response written, debug log only.
+      (Invariant I3 still holds: model work and the first Ollama chunk finish before headers go out.)
+    - Streaming response interrupted by shutdown → SSE write fails inside `_safe_write`, debug-logged; `_sse`
+      re-raises `ConnectionResetError`; the streaming loop's outer `except (OSError, ValueError)` debug-logs,
+      closes the engine generator in `finally`, and the handler thread exits cleanly. The process exits `0`
+      once `manager.unload()` returns and the lock is released.
+    - Non-streaming response raced by shutdown → same swallow at the `_safe_write` site, debug log only.
+  - Why: today only `BrokenPipeError`/`ConnectionResetError` are caught inside the streaming loops; `_begin_sse`,
+    `_send_json`, and `_sse_error` are unguarded. Writes that hit a closed-by-shutdown file raise
+    `OSError([Errno 9] Bad file descriptor)` or `ValueError("I/O operation on closed file.")`, the traceback prints
+    at the same time as `Shutting down server...`, and the operator reads it as a crash even though
+    `daemon_threads = True` keeps the process alive.
+  - Stdlib-only. No new env var, no new CLI flag, no new endpoint.
+  - No invariant changes (I1–I8 still hold).
+  - Docs: `docs/api.md` Concurrency paragraph gains one sentence naming the shutdown behaviour and the `0` exit
+    code. `CHANGELOG.md` `[Unreleased]` gets a `### Fixed` entry.
+
 ### Implemented (Phase 1: Parallel use must not exhaust the machine)
 
 - **P1 Resource budget** (`prism/resources.py`): before an ONNX model is loaded, `check_can_load(model_path, device)` compares free

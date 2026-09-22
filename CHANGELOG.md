@@ -43,6 +43,12 @@ versions may include breaking changes).
 - Tests: WSL config doctor tests in `tests/test_prism_cli.py` now run hermetically on non-WSL Linux environments (`is_wsl_system` honors `PRISM_WSLCONFIG_PATH` and `PRISM_FORCE_WSL=0`).
 - ONNX engine dropped every token with id 0 (`!` in Phi-4: "Wow! Great!" came out as "Wow Great") and did not count it, so a reply cut off at `max_tokens` could be
   reported as `finish_reason: stop`.
+- Ctrl+C / SIGTERM during an in-flight streamed response used to print a `Traceback` alongside the "Shutting down server…" message
+  (`OSError("Bad file descriptor")` or `ValueError("I/O operation on closed file.")` from a `wfile.write` after `with server:` closed
+  the connection underneath the daemon handler thread). The SSE / JSON writers — `_begin_sse`, `_sse`, `_sse_error`, `_send_json`,
+  `_send_cors_headers`, `do_OPTIONS`, and the streaming loops in `_generate` / `_generate_ollama` — now swallow that family of
+  I/O errors at debug; `_sse` re-raises `ConnectionResetError` when its write failed so the streaming loops' existing
+  client-disconnect catch aborts generation as before. `POST /v1/drain` (P12) is its own exit path and is unchanged.
 
 ## [0.2.0] - 2026-09-20
 

@@ -195,6 +195,8 @@ Prism.
 
 A request that closes its HTTP connection while it is queued behind another caller (waiting for the engine lock) is removed from the queue immediately and never produces a response; the slot it held is freed for the next caller, and the holder is unaffected. The same handling applies to both `/v1/chat/completions` and `/v1/completions` (they share the generation path). Disconnects mid-generation are still detected and stop the generation, as before.
 
+Ctrl+C (or a default-handler `SIGTERM`) during an in-flight streamed response finishes the current generation under the engine lock and exits with status 0; no client-side connection error surfaces as an unhandled Traceback.
+
 ## Authentication and CORS
 
 See [Security](security.md). With `--api-key`, every endpoint except `/health` requires `Authorization: Bearer <key>`.

@@ -1301,6 +1301,142 @@ class TestClientDisconnect(ServerTestBase):
         self.assertEqual(first["resp"].status, 200, first)
 
 
+class TestShutdownRace(ServerTestBase):
+    """Phase 9 / P13 (spec.md §4): the SSE / JSON writers must not raise an unhandled exception
+    when the HTTP connection is closed by `with server:` shutdown or by a vanished peer.
+    Today only `(BrokenPipeError, ConnectionResetError)` is caught in the streaming loops
+    and in `_dispatch`; an `OSError` ("Bad file descriptor") or `ValueError` from a write
+    after the connection file is closed falls through to `logger.exception` and surfaces a
+    Traceback at the same time as `Shutting down server...` — looks like a crash while
+    the daemon thread actually just dies cleanly."""
+
+    @staticmethod
+    def _swallow_remote(_conn_action):
+        """Run `conn_action()` and swallow the family of `http.client` exceptions that arise
+        when the server itself closes the connection without sending a response. Used by
+        all three tests below — the server is patched to fail header writes, so the client
+        always sees a closed-without-response."""
+        try:
+            return _conn_action()
+        except (http.client.RemoteDisconnected, http.client.BadStatusLine,
+                ConnectionResetError, BrokenPipeError, OSError, ValueError):
+            return None
+
+    def test_begin_sse_after_connection_close_does_not_log_exception(self):
+        """`_begin_sse` writes response headers via `send_response`/`send_header`/`end_headers`.
+        Without the four-class guard, an `OSError(9, "Bad file descriptor")` from a torn-down
+        connection falls into `_dispatch`'s last-resort `except Exception` branch and calls
+        `logger.exception`, surfacing a Traceback. With the guard, `_begin_sse` returns
+        silently and `logger.exception` is never invoked for this path."""
+        from prism import server as server_mod
+        with patch.object(server_mod.OpenAIApiHandler, "send_response",
+                          side_effect=OSError(9, "Bad file descriptor")), \
+             patch.object(server_mod.OpenAIApiHandler, "send_header",
+                          side_effect=OSError(9, "Bad file descriptor")), \
+             patch.object(server_mod.OpenAIApiHandler, "end_headers",
+                          side_effect=OSError(9, "Bad file descriptor")), \
+             patch.object(server_mod.logger, "exception") as exc_log:
+            def drive():
+                conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+                try:
+                    conn.request("POST", "/v1/chat/completions",
+                                 body=json.dumps({"model": "qwen-coder-gpu", "stream": True,
+                                                  "messages": [{"role": "user", "content": "x"}]}),
+                                 headers={"Content-Type": "application/json"})
+                    resp = conn.getresponse()
+                    return resp.read()
+                finally:
+                    conn.close()
+            self._swallow_remote(drive)
+        self.assertFalse(exc_log.called,
+                         f"OSError from _begin_sse surfaced via logger.exception: {exc_log.call_args_list!r}")
+        # Server itself is still alive — /health answers normally.
+        resp, _ = self.request("GET", "/health")
+        self.assertEqual(resp.status, 200)
+
+    def test_sse_write_after_connection_close_is_swallowed(self):
+        """The streaming loop's `except (OSError, ValueError)` clause must catch the
+        family of errors the response writers raise after the connection file is closed
+        (P13) — currently `(BrokenPipeError, ConnectionResetError, OSError, ValueError)`
+        was the four-class form, simplified to `(OSError, ValueError)` after review
+        (the first two are `OSError` subclasses). Without the widened catch, a
+        `ValueError("I/O operation on closed file.")` from `_sse` falls into the loop's
+        `except Exception` branch and `logger.exception` prints a Traceback.
+
+        Unlike `_begin_sse` (silent on peer-gone), `_sse` re-raises `ConnectionResetError`
+        on a swallowed write so the streaming loops' catch aborts generation as before
+        (P5/P9) — that re-raise contract is verified separately by
+        `test_sse_raises_connection_reset_when_safe_write_returns_none` below."""
+        from prism import server as server_mod
+        with patch.object(server_mod.OpenAIApiHandler, "_sse",
+                          side_effect=ValueError("I/O operation on closed file.")), \
+             patch.object(server_mod.logger, "exception") as exc_log:
+            def drive():
+                conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+                try:
+                    conn.request("POST", "/v1/chat/completions",
+                                 body=json.dumps({"model": "qwen-coder-gpu", "stream": True,
+                                                  "messages": [{"role": "user", "content": "x"}]}),
+                                 headers={"Content-Type": "application/json"})
+                    resp = conn.getresponse()
+                    return resp.read()
+                finally:
+                    conn.close()
+            self._swallow_remote(drive)
+        self.assertFalse(exc_log.called,
+                         f"ValueError from _sse surfaced via logger.exception: {exc_log.call_args_list!r}")
+        resp, _ = self.request("GET", "/health")
+        self.assertEqual(resp.status, 200)
+
+    def test_sse_raises_connection_reset_when_safe_write_returns_none(self):
+        """P13 contract: when `_safe_write` swallows a peer-gone signal, `_sse` re-raises
+        `ConnectionResetError` so the streaming loops' existing catch aborts generation
+        (P5/P9). Without this re-raise the engine would run to completion with no reader.
+
+        Uses a plain stub class with a `staticmethod` `_safe_write` so the production
+        `_sse` body runs (descriptor protocol resolves the patched function on the
+        instance), without driving a real HTTP request — the daemon handler thread
+        from a real streaming request would race `FakeEngine.produced` against later
+        tests, breaking `TestStopSequences`."""
+        from prism import server as server_mod
+
+        class _Stub:
+            pass
+
+        with patch.object(server_mod.OpenAIApiHandler, "_safe_write",
+                          staticmethod(lambda _action: None)):
+            _Stub._safe_write = staticmethod(lambda _action: None)
+            with self.assertRaises(ConnectionResetError):
+                server_mod.OpenAIApiHandler._sse(_Stub(), {"role": "assistant"})
+
+    def test_send_json_after_connection_close_does_not_log_exception(self):
+        """`_send_json` is the non-streaming sibling of `_begin_sse` — used by `GET /v1/models`,
+        `/health`, `/v1/unload`, `/v1/drain`, every `ApiError` reply. A torn-down connection
+        mid-`_send_json` triggers `logger.exception` in the current code path too."""
+        from prism import server as server_mod
+        with patch.object(server_mod.OpenAIApiHandler, "send_response",
+                          side_effect=ValueError("I/O operation on closed file.")), \
+             patch.object(server_mod.OpenAIApiHandler, "send_header",
+                          side_effect=ValueError("I/O operation on closed file.")), \
+             patch.object(server_mod.OpenAIApiHandler, "end_headers",
+                          side_effect=ValueError("I/O operation on closed file.")), \
+             patch.object(server_mod.logger, "exception") as exc_log:
+            def drive():
+                conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+                try:
+                    conn.request("GET", "/v1/models")
+                    resp = conn.getresponse()
+                    return resp.read()
+                finally:
+                    conn.close()
+            self._swallow_remote(drive)
+        self.assertFalse(exc_log.called,
+                         f"ValueError from _send_json surfaced via logger.exception: {exc_log.call_args_list!r}")
+        # Same "/health" follow-up the first two tests in this class have, for symmetry.
+        resp, _ = self.request("GET", "/health")
+        self.assertEqual(resp.status, 200)
+
+
 class TestAuthAndCors(ServerTestBase):
     api_key = "s3cret"
     cors_origins = ("http://localhost:3000",)

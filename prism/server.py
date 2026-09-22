@@ -433,6 +433,29 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------ plumbing
 
+    @staticmethod
+    def _safe_write(action):
+        """Run `action`; swallow the I/O failures that arise when the HTTP connection is
+        closed by `with server:` shutdown or by a vanished peer. Without this guard, an
+        `OSError("Bad file descriptor")` or `ValueError("I/O operation on closed file.")`
+        raised by `wfile` / `send_response` / `send_header` / `end_headers` propagates up
+        to `_dispatch`'s `except Exception` branch and is logged at `logger.exception`,
+        surfacing a Traceback in the operator's terminal at the same time as
+        `Shutting down server...` — looks like a crash while the daemon thread actually
+        just dies cleanly. With this guard, the connection-closed errors are debug-logged
+        and the response is dropped (the peer is gone anyway). The catch tuple is
+        `(OSError, ValueError)`: `BrokenPipeError` and `ConnectionResetError` are
+        `OSError` subclasses, and `ValueError` covers the `BufferedWriter` "I/O operation
+        on closed file." case that does not derive from `OSError`.
+
+        Returns whatever `action()` returned, or `None` on a swallowed error. Stdlib-only.
+        """
+        try:
+            return action()
+        except (OSError, ValueError) as ex:
+            logger.debug("client connection closed during response write: %s", ex)
+            return None
+
     @property
     def manager(self) -> ActiveEngineManager:
         return self.server.manager
@@ -447,21 +470,21 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
     def _send_cors_headers(self):
         origin = self._cors_allowed_origin()
         if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-            self.send_header("Vary", "Origin")
+            self._safe_write(lambda: self.send_header("Access-Control-Allow-Origin", origin))
+            self._safe_write(lambda: self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
+            self._safe_write(lambda: self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization"))
+            self._safe_write(lambda: self.send_header("Vary", "Origin"))
 
     def _send_json(self, status: int, obj: Any, headers: Optional[Dict[str, str]] = None):
         body = json.dumps(obj).encode("utf-8")
-        self.send_response(status)
+        self._safe_write(lambda: self.send_response(status))
         self._send_cors_headers()
         for name, value in (headers or {}).items():
-            self.send_header(name, value)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+            self._safe_write(lambda n=name, v=value: self.send_header(n, v))
+        self._safe_write(lambda: self.send_header("Content-Type", "application/json"))
+        self._safe_write(lambda: self.send_header("Content-Length", str(len(body))))
+        self._safe_write(lambda: self.end_headers())
+        self._safe_write(lambda: self.wfile.write(body))
 
     def _send_api_error(self, err: ApiError):
         body: Dict[str, Any] = {"message": err.message, "type": err.err_type, "param": None, "code": err.code}
@@ -518,6 +541,12 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
         except ApiError as err:
             self._send_api_error(err)
         except (BrokenPipeError, ConnectionResetError, ClientDisconnectedError):
+            # Intentionally NOT widened to the `(OSError, ValueError)` that `_safe_write`
+            # swallows at the write call-site (P13): a handler is allowed to raise
+            # `OSError` / `ValueError` from its own logic (file paths, int parsing, …)
+            # and those should reach the `except Exception` branch below, not be silently
+            # turned into "client disconnected". I/O failures the response writers raise
+            # are pre-empted at the point of the failing write, before they reach here.
             logger.debug("client disconnected")
         except Exception as ex:  # last resort: never drop the connection without a reply
             logger.exception("unhandled error serving %s", path)
@@ -529,10 +558,10 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ routes
 
     def do_OPTIONS(self):
-        self.send_response(204)
+        self._safe_write(lambda: self.send_response(204))
         self._send_cors_headers()
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        self._safe_write(lambda: self.send_header("Content-Length", "0"))
+        self._safe_write(lambda: self.end_headers())
 
     def do_GET(self):
         self._dispatch(
@@ -914,9 +943,9 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                     self._sse(chunk(None, "stop" if stats["stopped"] else engine.last_finish_reason))
                 if include_usage:
                     self._sse(usage_chunk(prompt_tokens, stats["tokens"], telemetry()))
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+                self._safe_write(lambda: self.wfile.write(b"data: [DONE]\n\n"))
+                self._safe_write(lambda: self.wfile.flush())
+            except (OSError, ValueError):
                 logger.debug("client disconnected mid-stream; aborting generation")
             except Exception as ex:
                 logger.exception("generation failed")
@@ -972,9 +1001,9 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             self._sse(chunk(None, "tool_calls" if calls else stats.get("finish_reason", "stop")))
             if include_usage and "prompt_tokens" in stats and "completion_tokens" in stats:
                 self._sse(usage_chunk(stats["prompt_tokens"], stats["completion_tokens"]))
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+            self._safe_write(lambda: self.wfile.write(b"data: [DONE]\n\n"))
+            self._safe_write(lambda: self.wfile.flush())
+        except (OSError, ValueError):
             logger.debug("client disconnected mid-stream")
         except Exception as ex:
             self._sse_error(f"Ollama backend error: {ex}")
@@ -984,24 +1013,40 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
                 close()
 
     def _begin_sse(self):
-        self.send_response(200)
+        # Peer-gone is silent here: the streaming loop's first `_sse` will surface the
+        # closed connection via `ConnectionResetError` and the existing catch in
+        # `_generate` will abort generation. Headers that didn't make it don't matter.
+        self._safe_write(lambda: self.send_response(200))
         self._send_cors_headers()
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self.end_headers()
+        self._safe_write(lambda: self.send_header("Content-Type", "text/event-stream"))
+        self._safe_write(lambda: self.send_header("Cache-Control", "no-cache"))
+        self._safe_write(lambda: self.send_header("Connection", "close"))
+        self._safe_write(lambda: self.end_headers())
         self.close_connection = True
 
     def _sse(self, payload: Dict[str, Any]):
-        self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
-        self.wfile.flush()
+        # Unlike `_begin_sse` (silent on peer-gone), `_sse` re-raises `ConnectionResetError`
+        # when the write failed: the streaming loop's existing `except (BrokenPipeError,
+        # ConnectionResetError)` clause uses that signal to abort generation (P5/P9).
+        # `_safe_write` returns `None` only when it swallowed the four-class I/O errors,
+        # i.e. exactly when the peer is gone — we don't lose information, we don't print
+        # a Traceback, and we don't run the engine to completion with no reader.
+        if self._safe_write(lambda: self.wfile.write(
+                f"data: {json.dumps(payload)}\n\n".encode("utf-8"))) is None:
+            raise ConnectionResetError("client connection closed")
+        self._safe_write(lambda: self.wfile.flush())
 
     def _sse_error(self, message: str):
+        # `_sse` raises `ConnectionResetError` on a closed connection (a subclass of
+        # `OSError`); the streaming loops' `except (OSError, ValueError)` clause covers it,
+        # so a peer-gone here is swallowed without a Traceback and the loop's `finally`
+        # closes the generator. The trailing `[DONE]` writes go through `_safe_write` and
+        # never raise — the outer try is here only to catch the `_sse` re-raise.
         try:
             self._sse({"error": {"message": message, "type": "server_error", "code": None}})
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+            self._safe_write(lambda: self.wfile.write(b"data: [DONE]\n\n"))
+            self._safe_write(lambda: self.wfile.flush())
+        except (OSError, ValueError):
             pass
 
     def log_message(self, format, *args):
