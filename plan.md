@@ -77,9 +77,21 @@ Spec: `spec.md` section 4 (P7). Status: Phase 2 complete; review-2 found 7 issue
 - [ ] `--variant`: a CLI test that passes the flag to `pull_model`; add it to the command table in `README.md`.
 - [ ] `scripts/verify_templates.py`: compare `render_prompt` with `format_prompt` for local models.
 - [ ] Telemetry: VRAM used/free in `prism doctor` and a log warning when little is free (`get_gpu_info()` already has `vram_free_mb`).
+- [ ] Aliases for Gemma/Qwen/Llama (no official ONNX GenAI repos exist today; only local conversions).
 
 ### Outward actions (operator only, `REVIEW.md` section 4)
 - [ ] Close issue #5 with a comment (cause, new default chunk, measurement table).
 - [ ] Comment on issue #6 (cause, measurements, what changed in Prism). The operator decided **not** to report upstream to
   `microsoft/onnxruntime-genai` for now.
 - [ ] Release `0.2.x`: version bump, dated changelog heading, tag, TestPyPI, PyPI (`docs/development.md#releasing`).
+
+---
+
+## Phase 4: Operator-driven model unload (`POST /v1/unload`)
+
+Spec: `spec.md` section 4 (P8). Status: implemented; review-3 returned 6 findings, all addressed (1+6 dropped the unreachable `405` from spec and documented the actual `404`/`501` behavior; 2 fixed the race on `current_model_id` by making `unload()` return the released id under the lock; 3 dropped `test_get_on_unload_path_returns_404` as it is not red-first; 4 reworded the docstring; 5 harmonized the empty `Content-Length` check with `_read_json_body`). Fixes were verified by `sdlc_check.py` (399 tests), not re-reviewed by a fresh subagent.
+
+- [x] 4.1 `prism/server.py`: add `POST /v1/unload` to `do_POST` and a `_handle_unload` method that reads an optional JSON object body (any value, ignored today; 400 if a non-empty body is not a JSON object), calls `self.manager.unload()`, and returns `200 {"unloaded": bool, "model": str|null}` (`unloaded` reflects whether a model was resident; `null` if nothing was loaded). Tests in `tests/test_prism_server_api.py` — new class `TestUnload` covering: idempotent no-model case (`unloaded: false, model: null`); unload after a chat request (`unloaded: true, model: "<id>"`, then `active_model` cleared in `GET /health`); no auth with `--api-key` returns 401; empty body and a JSON object body both succeed; a non-object body returns 400; a wrong path returns 404; only `POST` is wired (`GET /v1/unload` returns 404).
+- [x] 4.2 `docs/api.md`: add the endpoint to the table, describe request/response shape, document that the engine lock is held during the call so concurrent generations complete before the model is released; add the new failure-mode rows to the Errors table. `CHANGELOG.md`: add a `### Added` entry under `[Unreleased]` for `POST /v1/unload`. Tests: `tests/test_docs.py` (`--only docs`).
+
+> **Commit note.** The gate enforces docs+changelog the moment runtime code changes, so items 4.1 and 4.2 land in **one** commit (not two). If two commits are wanted later, the operator can split the change with `git reset --soft HEAD~1` and stage `prism/server.py` + `tests/` + `spec.md` separately from `docs/api.md` + `CHANGELOG.md`.

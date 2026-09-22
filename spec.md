@@ -52,6 +52,16 @@ Tests and reviews cite these by number. Changing one needs operator approval.
   - **Legacy text completions (`/v1/completions`)**: Unaffected; returns raw text.
   - **Tool calling**: If a reasoning model emits `<think>...</think>` before a tool call, `reasoning_content` is extracted and provided alongside `tool_calls`.
 
+### Phase 4: Operator-driven model unload (`plan.md` Phase 4)
+
+- **P8 Operator unload** (`POST /v1/unload`): drops the ONNX model currently held by `ActiveEngineManager` and frees its VRAM/RAM, so an external tool (e.g. a benchmark script) can swap to a different large model without restarting `prism serve`.
+  - **Auth**: requires the API key (default behavior of `_dispatch` for any path not listed as `public`); without `--api-key`, every caller is on loopback and the endpoint is open there.
+  - **Request body**: optional. With `Content-Length: 0` (or absent) the body is treated as `{}`; any JSON object is accepted and ignored (reserved for future options such as a timeout). A non-empty body that is not a JSON object returns `400`.
+  - **Response**: `200 {"unloaded": bool, "model": string|null}`. `unloaded` is `true` if a model was resident and is now released, `false` otherwise (idempotent: repeated calls succeed and report `false` once nothing is loaded). `model` is the id of the released model, or `null` when none was held.
+  - **Concurrency**: `manager.unload()` acquires the engine lock, so if a generation is in flight the unload waits for it to finish. The HTTP call is therefore synchronous and may take seconds; a request that wants a fast yes/no should check `GET /health` (`active_model`) before calling.
+  - **Scope**: only ONNX models go through `ActiveEngineManager`; Ollama models are not loaded into the server process and are unaffected. Loading another model after `unload()` re-runs the resource budget check (Phase 1, P1).
+  - **Failure modes**: `400 invalid_request_error` for a non-empty, non-object body or for an invalid `Content-Length` header; `401 invalid_api_key` when the bearer token does not match `--api-key`; `404 not_found` for any other path. Non-`POST` methods inherit the stdlib behavior: `GET /v1/unload` returns `404` (the path is unknown to `do_GET`'s route map), other methods return `501 Unsupported` from `BaseHTTPRequestHandler`. No new state on the server, no new environment variable.
+
 ### Implemented (Phase 1: Parallel use must not exhaust the machine)
 
 - **P1 Resource budget** (`prism/resources.py`): before an ONNX model is loaded, `check_can_load(model_path, device)` compares free

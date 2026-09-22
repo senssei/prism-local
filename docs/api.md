@@ -40,6 +40,7 @@ curl -s http://127.0.0.1:5272/v1/chat/completions -H 'Content-Type: application/
 | `POST /v1/chat/completions` | Chat completion, streaming or not |
 | `POST /v1/embeddings` | Embeddings, **Ollama models only** (see [Embeddings](#embeddings)) |
 | `POST /v1/completions` | Legacy text completion. ONNX models get the raw prompt (no chat template). Ollama models get it as one user message. |
+| `POST /v1/unload` | Drop the ONNX model held by the server, freeing its VRAM/RAM. Idempotent; see [Unload](#unload). |
 | `GET /health` (also `/v1/health`, `/v1/status`) | Status, `active_model`, `active_device` (`cuda`/`cpu`/`null` when nothing is loaded) and GPU telemetry. **No auth required.** |
 
 Trailing slashes are accepted.
@@ -115,13 +116,35 @@ curl -s http://127.0.0.1:5272/v1/embeddings -H 'Content-Type: application/json' 
 The reply is `{"object": "list", "data": [{"object": "embedding", "index", "embedding"}], "model", "usage": {"prompt_tokens", "total_tokens"}}`. A missing or
 unreachable daemon is `502 backend_unavailable`; a model Ollama does not have is `404 model_not_found`.
 
+## Unload
+
+`POST /v1/unload` releases the ONNX model currently held by the server. Useful between benchmark runs of different large
+models (so each one starts from cold VRAM) and when switching from a big ONNX model to a small one. The endpoint is
+idempotent: a second call when nothing is loaded still returns `200`.
+
+```bash
+curl -s -X POST http://127.0.0.1:5272/v1/unload \
+  -H 'Authorization: Bearer YOUR_KEY'      # only when --api-key is set
+```
+
+The body is optional (`{}` if absent) and any JSON object is accepted and ignored. The reply is:
+
+```json
+{"unloaded": true, "model": "phi-4-mini"}
+```
+
+`unloaded` is `true` when a model was resident and is now released, `false` otherwise; `model` is the id of the released model
+(`null` when nothing was loaded). `manager.unload()` acquires the engine lock, so if a generation is in flight the unload
+waits for it to finish — the HTTP call is synchronous and may take seconds. Ollama models are not loaded into the server
+process and are unaffected. Loading a different model after `unload()` re-runs the resource-budget check ([Concurrency](#concurrency)).
+
 ## Errors
 
 All errors are JSON: `{"error": {"message", "type", "param", "code"}}`.
 
 | Status | `code` | Meaning |
 |---|---|---|
-| 400 | *(none)* | Invalid JSON, missing/invalid `messages`, `model`, or a numeric field |
+| 400 | *(none)* | Invalid JSON, missing/invalid `messages`, `model`, or a numeric field; `/v1/unload` body that is not a JSON object |
 | 400 | `embeddings_not_supported` / `dimensions_not_supported` | `/v1/embeddings` with an ONNX model / with `dimensions` |
 | 400 | `tools_not_supported` | `tools` sent to an ONNX model whose chat template cannot take them, or without jinja2 installed |
 | 400 | `ambiguous_model` | The name matches several models; the message lists them |

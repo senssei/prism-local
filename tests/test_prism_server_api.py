@@ -301,6 +301,69 @@ class TestHealthAndModels(ServerTestBase):
         self.assertTrue(all(m["device"] == "CPU" for m in data["data"] if m["id"] != "ollama:tiny:1b"))
 
 
+class TestUnload(ServerTestBase):
+    """P8 (spec.md): `POST /v1/unload` drops the ONNX model held by the engine manager. Idempotent, optional body,
+    auth-required when `--api-key` is set."""
+
+    def test_unload_with_no_model_returns_unloaded_false_idempotent(self):
+        resp, data = self.request("POST", "/v1/unload")
+        self.assertEqual((resp.status, data), (200, {"unloaded": False, "model": None}))
+
+    def test_unload_after_chat_releases_the_model_and_clears_active_model_in_health(self):
+        self.chat()
+        self.assertEqual(self.manager.current_model_id, "qwen-coder-gpu")
+        resp, data = self.request("POST", "/v1/unload")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(data, {"unloaded": True, "model": "qwen-coder-gpu"})
+        self.assertIsNone(self.manager.current_model_id)
+        _, health = self.request("GET", "/health")
+        self.assertIsNone(health["active_model"])
+
+    def test_second_unload_is_idempotent(self):
+        self.chat()
+        first = self.request("POST", "/v1/unload")[1]
+        second = self.request("POST", "/v1/unload")[1]
+        self.assertEqual(first, {"unloaded": True, "model": "qwen-coder-gpu"})
+        self.assertEqual(second, {"unloaded": False, "model": None})
+
+    def test_unload_with_json_object_body_succeeds_and_ignores_the_body(self):
+        self.chat()
+        resp, data = self.request("POST", "/v1/unload", {"reason": "benchrig"})
+        self.assertEqual((resp.status, data["unloaded"], data["model"]),
+                         (200, True, "qwen-coder-gpu"))
+
+    def test_unload_with_non_object_body_returns_400(self):
+        resp, data = self.request("POST", "/v1/unload", ["not", "an", "object"])
+        self.assertEqual(resp.status, 400)
+        self.assertIn("object", data["error"]["message"])
+
+    def test_manager_unload_returns_previous_model_id_atomically(self):
+        """Reviewer finding: reading `current_model_id` outside the engine lock can report a phantom unload.
+
+        `manager.unload()` must atomically return the released id (or None when nothing was loaded), so the handler
+        never reports `unloaded: true` for a model the previous thread already released.
+        """
+        self.chat()
+        previous = self.manager.unload()
+        self.assertEqual(previous, "qwen-coder-gpu")
+        self.assertIsNone(self.manager.current_model_id)
+        again = self.manager.unload()
+        self.assertIsNone(again)
+
+
+class TestUnloadAuth(ServerTestBase):
+    api_key = "s3cret"
+
+    def test_unload_without_api_key_returns_401(self):
+        resp, data = self.request("POST", "/v1/unload")
+        self.assertEqual((resp.status, data["error"]["code"]), (401, "invalid_api_key"))
+
+    def test_unload_with_correct_api_key_succeeds(self):
+        resp, data = self.request("POST", "/v1/unload",
+                                  headers={"Authorization": "Bearer s3cret"})
+        self.assertEqual((resp.status, data), (200, {"unloaded": False, "model": None}))
+
+
 class TestStreamUsage(ServerTestBase):
     """OpenAI's stream_options.include_usage: token counts (and Prism's device telemetry) in the last streamed chunk."""
 

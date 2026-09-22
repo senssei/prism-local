@@ -123,12 +123,19 @@ class ActiveEngineManager:
         finally:
             self.lock.release()
 
-    def unload(self) -> None:
+    def unload(self) -> Optional[str]:
+        """Drop the resident engine and return its id (or `None` when nothing was loaded).
+
+        Reading the id and clearing the state happen under one lock acquisition, so callers never report
+        `unloaded: true` for a model a concurrent thread already released.
+        """
         with self.lock:
+            previous = self.current_model_id
             if self.engine is not None:
                 self.engine.unload()
                 self.engine = None
                 self.current_model_id = None
+            return previous
 
 
 ENGINE_MANAGER = ActiveEngineManager()
@@ -458,6 +465,7 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             "/v1/chat/completions": self._handle_chat_completions,
             "/v1/completions": self._handle_completions,
             "/v1/embeddings": self._handle_embeddings,
+            "/v1/unload": self._handle_unload,
         })
 
     def _handle_list_models(self):
@@ -483,6 +491,33 @@ class OpenAIApiHandler(http.server.BaseHTTPRequestHandler):
             "active_device": getattr(self.manager.engine, "device", None),
             "hardware": get_gpu_info(),
         })
+
+    def _handle_unload(self):
+        """P8: drop the ONNX model currently held by the engine manager. Idempotent.
+
+        The body is optional (`{}` if absent) and, when present, must be a JSON object. The model id is read and
+        cleared atomically by `manager.unload()` under the engine lock, so the reply never reports `unloaded: true`
+        for a model a concurrent thread already released. The lock also makes an in-flight generation finish first.
+        """
+        raw_len = self.headers.get("Content-Length")
+        if raw_len is not None:
+            try:
+                length = int(raw_len)
+            except ValueError:
+                raise ApiError(400, "Invalid Content-Length")
+            if length < 0:
+                raise ApiError(400, "Invalid Content-Length")
+            if length > MAX_BODY_BYTES:
+                raise ApiError(413, f"Request body exceeds {MAX_BODY_BYTES} bytes", code="body_too_large")
+            if length > 0:
+                try:
+                    body = json.loads(self.rfile.read(length).decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    raise ApiError(400, "Invalid JSON payload")
+                if not isinstance(body, dict):
+                    raise ApiError(400, "JSON body must be an object")
+        previous = self.manager.unload()
+        self._send_json(200, {"unloaded": previous is not None, "model": previous})
 
     # ------------------------------------------------------------------ inference
 

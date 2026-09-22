@@ -10,6 +10,7 @@ versions may include breaking changes).
 - `PRISM_PREFILL_CHUNK` now defaults to `1024` tokens (`0` or `off` restores whole-prompt prefill). Without it, one long prompt left most of the GPU memory
   held after the model was unloaded, and the next model loaded then ran about 25 times slower (qwen2.5-coder-7b after a 4200-token Phi-4-mini prompt: TTFT
   83 s and 1.2 tok/s, against 0.34 s and 30 tok/s with the default).
+- README: a "Prism" badge was added next to the existing version/CI/license badges, linking to the project repository.
 - ONNX sampling: `temperature` and `top_p` now take effect. Most `genai_config.json` files say `top_k: 1`, and with that ONNX Runtime GenAI ignores both, so every
   request was greedy (Phi-4-mini at temperature 1.5: 1 distinct output in 4 runs before, 4 in 4 now). When sampling, `top_k` is the model's own value if above 1, else 40.
 
@@ -26,6 +27,10 @@ versions may include breaking changes).
   `unsupported_parameter` instead of being silently ignored.
 - Loop guard: an ONNX generation that ends in a repeating token cycle (period up to 64 tokens, over at least 200 tokens and 12 repetitions) is stopped after a warning
   in the log and reported as `finish_reason: length`. `PRISM_LOOP_GUARD=off` disables it.
+- `POST /v1/unload`: drops the ONNX model currently held by `prism serve` and frees its VRAM/RAM. The body is optional (any JSON object is accepted and ignored),
+  the call is idempotent (`{"unloaded": bool, "model": string|null}`), and it acquires the engine lock so an in-flight generation finishes before the model is released.
+  Useful between benchmark runs of different large models, so each one starts from cold VRAM. Requires the API key when `--api-key` is set; without it, the endpoint is open on
+  loopback like every other route.
 
 ### Fixed
 - Tests: WSL config doctor tests in `tests/test_prism_cli.py` now run hermetically on non-WSL Linux environments (`is_wsl_system` honors `PRISM_WSLCONFIG_PATH` and `PRISM_FORCE_WSL=0`).

@@ -8,6 +8,7 @@
     <a href="https://github.com/senssei/prism-local/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+" />
     <img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status: alpha" />
+    <a href="https://github.com/senssei/prism-local"><img src="https://img.shields.io/badge/Prism-blueviolet" alt="Prism" /></a>
   </p>
 </div>
 
