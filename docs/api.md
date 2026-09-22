@@ -175,7 +175,7 @@ All errors are JSON: `{"error": {"message", "type", "param", "code"}}`.
 | 400 | *(none)* | Invalid JSON, missing/invalid `messages`, `model`, or a numeric field; `/v1/unload` body that is not a JSON object |
 | 400 | `embeddings_not_supported` / `dimensions_not_supported` | `/v1/embeddings` with an ONNX model / with `dimensions` |
 | 400 | `tools_not_supported` | `tools` sent to an ONNX model whose chat template cannot take them, or without jinja2 installed |
-| 400 | `template_render_failed` | The model's chat template raised while rendering with the provided `tools`. The message names the model id and the underlying jinja/template exception text so the caller can identify the field that tripped the template; Prism does not silently drop tools from the prompt ([spec.md P11](../spec.md)) |
+| 400 | `template_render_failed` | The model's chat template raised while rendering with the provided `tools`. The message names the model id and the underlying jinja/template exception text so the caller can identify the field that tripped the template; Prism does not silently drop tools from the prompt ([spec.md P11](sdlc/spec.md)) |
 | 400 | `ambiguous_model` | The name matches several models; the message lists them |
 | 400 | `context_length_exceeded` | The prompt fills the model's context window (ONNX models with a known `context_length`) |
 | 401 | `invalid_api_key` | Missing or wrong bearer token |
