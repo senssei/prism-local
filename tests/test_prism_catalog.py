@@ -153,8 +153,10 @@ class TestPickDefaultModel(unittest.TestCase):
         self.assertEqual(pick_default_model(models), "cuda-model")
 
     def test_falls_back_to_the_first_model_when_none_is_cuda(self):
+        # Ollama entries carry no "device" key at all (list_ollama_models never sets one) —
+        # `.get("device", "")` must not choke on a missing key.
         models = [
-            {"id": "ollama:phi4-mini:latest", "device": "CPU/GPU"},
+            {"id": "ollama:phi4-mini:latest", "backend": "ollama"},
             {"id": "cpu-model", "device": "CPU"},
         ]
         self.assertEqual(pick_default_model(models), "ollama:phi4-mini:latest")

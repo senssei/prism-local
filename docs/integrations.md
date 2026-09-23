@@ -79,6 +79,43 @@ Generation talks to `$PRISM_BASE_URL` (default `http://localhost:5272/v1`, with 
 result before sending the next is unaffected, but a cancel sent for a turn that has already resolved can, in a race, stop
 the *next* turn instead (spec.md P16 documents this as a known limitation).
 
+### fs-mediated tool calls
+
+When the client editor advertises filesystem capabilities during `initialize` (`clientCapabilities.fs.readTextFile`, `clientCapabilities.fs.writeTextFile`), `prism acp` advertises two tools to the model:
+
+- `read_file(path: str, line: Optional[int], limit: Optional[int])`: mediated by the editor's `fs/read_text_file` JSON-RPC method.
+- `write_file(path: str, content: str)`: mediated by the editor's `fs/write_text_file` JSON-RPC method, always gated by a `session/request_permission` user prompt.
+
+The agent never opens a file, never writes to disk, and never spawns a subprocess (invariant I9); every byte passes through the client editor over stdio.
+
+#### Notification and update shapes
+
+Tool executions stream `session/update` notifications to the client:
+
+- `tool_call`: `{sessionUpdate: "tool_call", toolCallId: string, title: string, kind: "read" | "edit", status: "in_progress"}`
+- `tool_call_update` (success): `{sessionUpdate: "tool_call_update", toolCallId: string, status: "completed", content: [{"type": "content", "content": {"type": "text", "text": string}}]}`
+- `tool_call_update` (failure): `{sessionUpdate: "tool_call_update", toolCallId: string, status: "failed", content: [{"type": "content", "content": {"type": "text", "text": string}}]}`
+
+#### Permission flow
+
+Before executing `write_file`, `prism acp` sends `session/request_permission`:
+
+```json
+{
+  "sessionId": "...",
+  "toolCall": {"toolCallId": "call_..._0001", "title": "Write /path/to/file", "kind": "edit"},
+  "options": [
+    {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+    {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"}
+  ]
+}
+```
+
+The user's response determines execution:
+- `allow_once`: executes `fs/write_text_file` and reports success.
+- `reject_once`: skips writing and reports `"permission denied"` back to the model as a failed tool call so the model can react.
+- `cancelled`: cancels the current prompt turn with `stopReason: "cancelled"`.
+
 ```bash
 prism connect acp --test              # run a protocol handshake against `prism acp`
 prism connect acp --write             # merge an agent_servers entry into ~/.config/zed/settings.json

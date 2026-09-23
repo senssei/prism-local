@@ -12,7 +12,7 @@
 | `prism/ollama_bridge.py` | Talks to the Ollama daemon: list, chat streaming, pull |
 | `prism/server.py` | OpenAI-compatible HTTP server, auth/CORS/Host checks, the engine lock |
 | `prism/telemetry.py` | NVML GPU info, CUDA library discovery/preload, CUDA provider probe |
-| `prism/mcp.py`, `prism/connectors.py` | MCP stdio server and Cursor/Cline/MCP client configuration |
+| `prism/mcp.py`, `prism/acp.py`, `prism/connectors.py` | MCP and ACP stdio servers, and Cursor/Cline/MCP/Zed client configuration |
 | `prism/chat.py`, `prism/benchmark.py` | Interactive chat and the micro-benchmark |
 
 The package has no third-party runtime dependencies. `onnxruntime_genai` is imported lazily-tolerantly (`OG_AVAILABLE`), and

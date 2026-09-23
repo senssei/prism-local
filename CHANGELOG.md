@@ -7,6 +7,12 @@ versions may include breaking changes).
 ## [Unreleased]
 
 ### Fixed
+- `prism acp`'s direct-engine fallback (used when `prism serve` is unreachable) gave an unhelpful raw
+  `KeyError`/`AttributeError` message when the session's model was an Ollama model or unresolvable, instead of the
+  clear "start the server" message `prism mcp`'s equivalent fallback already gives; it now checks the resolved
+  model's backend first. A failure while reading an `HTTPError`'s body (e.g. the connection drops mid-read) is now
+  itself guarded — previously it could escape `_run_prompt`'s error handler entirely and silently drop the response
+  for that `session/prompt`, hanging the client with no reply at all.
 - `prism.mcp`'s lazy `_catalog()`/`_engine_manager()` singletons used a plain `threading.Lock` for
   `_state_lock`, but `_engine_manager()` calls `_catalog()` while already holding it — a
   non-reentrant lock self-deadlocks on that nested acquire, so `prism mcp`'s direct-engine fallback
@@ -16,6 +22,7 @@ versions may include breaking changes).
   `TestServerlessFallback` patches `mcp._manager` directly.
 
 ### Changed
+- Spec invariant I9 added: "ACP agent never touches user files or runs commands." Every read or write requested by the model is mediated through the client editor's `fs/*` capabilities.
 - `prism.cli` now reads `PRISM_API_KEY` (and, by next phase, the rest of the `PRISM_*` vars) through a typed `EnvConfig` dataclass in `prism/env_config.py`. CLI flags keep precedence over the env. Defaults are unchanged for users; a typo in a var is caught once at startup instead of at first use.
 - `tool_choice` is no longer silently rewritten to `"auto"` for every non-`"none"` value. The four accepted shapes (`"none" | "auto" | "required" | {"type": "function", "function": {"name": ...}}`) are honored as OpenAI specifies: the structured form narrows `tools` to the single named tool (a name not in the list is a hard `400 invalid_request_error` before the engine is touched; the unknown shape is also a `400`). The previous behaviour silently passed the full `tools` list to the model even when the caller explicitly named one tool.
 - `prism.templates.supports_tools` no longer uses `re.search(r"\btools\b", text)`. The check is now structural: the `tools` symbol must appear inside a Jinja expression (`{{ ... tools ... }}`) or a Jinja block (`{% ... tools ... %}`, covering `{% if tools %}`, `{% for t in tools %}`, `{% set t = tools %}`, etc.). Templates that only mention `tools` in a `{# comment #}` or in prose no longer falsely report support (no False-Positives on neighbouring text); the same models as before reach the `400 tools_not_supported` path because real Jinja usage still matches.
@@ -30,6 +37,7 @@ versions may include breaking changes).
 - `503 insufficient_resources` now carries a structured `error.holder = {"pid", "model"}` when the model-load lock is held by another process, alongside the existing prose in `error.message`. Orchestrators (e.g. `benchrig --runtime prism`) can read the field to decide between wait / drain / smaller-model.
 
 ### Added
+- ACP agent now mediates model tool calls through the editor's `fs/*` capabilities (`read_file`, `write_file`).
 - `prism acp`: a stdio server speaking the Agent Client Protocol (ACP), so ACP-capable editors (Zed and others) can run a
   streamed, cancellable chat session against a local, zero-cost Prism model. First milestone: `initialize`, `session/new`,
   `session/prompt` (plain-text content blocks only) and `session/cancel` — no file or terminal access yet. Falls back to an
@@ -46,7 +54,15 @@ versions may include breaking changes).
   `TypeError` a malformed request raises. A pathologically deep (but syntactically valid) JSON line no longer crashes
   the process with an uncaught `RecursionError`. The lazy `_catalog()`/`_engine_manager()` singletons are now guarded by
   a shared `threading.RLock`, closing a race where two sessions hitting the direct-engine fallback at once could each
-  construct their own engine manager (two engine locks instead of one, risking a concurrent model load).
+  construct their own engine manager (two engine locks instead of one, risking a concurrent model load). A session's
+  lifecycle can now be traced through `logging.getLogger("prism.acp")` (session creation, prompt accept/start/finish,
+  the direct-engine fallback trigger, failures, and cancellation), mirroring `prism/server.py`'s existing `logging`
+  convention; standard `logging` configuration applies, no new env var or flag. The module's remaining
+  operator-facing stderr notices (a dropped response when stdout is gone, a dropped malformed stdin line) now also
+  emit the equivalent `logging.warning` alongside the existing `sys.stderr` write.
+- `prism.mcp` gets the equivalent `logging.getLogger("prism.mcp")` tracing: `tools/call` dispatch and
+  `call_prism_server`'s model resolution, the direct-engine fallback trigger, and its HTTP/internal error paths, at
+  `DEBUG`/`WARNING`. Same convention as `prism.acp`; no behavior change.
 - Centralised env-var schema (`prism/env_config.py`, stdlib only): one frozen `EnvConfig` dataclass declaring every `PRISM_*` variable with its type, default, and `__post_init__` validator. `EnvConfig.from_env(...)` builds an instance from a Mapping; `EnvConfig.from_env_file(path)` parses a hand-rolled `KEY=VALUE` file (whitespace, `# comment`, double/single-quoted values); `load_config()` runs at CLI / server startup, fails fast on bad values (one `ValueError` listing every problem), and emits one `logging.warning` for any unknown `PRISM_*` key. No runtime dependency — no `kev`, no `pydantic-settings`, no `python-dotenv`. `.env` file loading is opt-in only: `PRISM_ENV_FILE=/path/to/.env` (security: never auto-discover a file the operator did not name).
 - Reasoning separation: `prism.reasoning` module extracting `<think>...</think>` blocks into `message.reasoning_content` (and streaming `delta.reasoning_content`) for OpenAI-compatible `/v1/chat/completions` across ONNX and Ollama backends, while keeping raw output intact for legacy `/v1/completions`.
 - Thread control: `PRISM_THREADS` environment variable to set intra-op thread count via session_options overlay on ONNX models.

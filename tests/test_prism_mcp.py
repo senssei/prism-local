@@ -147,10 +147,6 @@ class TestMcpErrorHints(unittest.TestCase):
             self.assertIn("PRISM_RESOURCE_CHECK=off", out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestMcpAutoStop(unittest.TestCase):
     """Phase 6 / P10: $PRISM_MCP_AUTO_STOP_SEC makes the stdio MCP server exit after N seconds
     without a `tools/call`. Intended for test harnesses that start the MCP process but never drive it;
@@ -249,3 +245,45 @@ class TestMcpAutoStop(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+
+
+class TestLogging(unittest.TestCase):
+    """Tool-call dispatch and `call_prism_server`'s fallback behavior can be traced through
+    `logging.getLogger("prism.mcp")`, mirroring `prism/acp.py`'s equivalent tracing."""
+
+    def test_tool_call_logs_the_tool_name(self):
+        with self.assertLogs("prism.mcp", level="DEBUG") as cm:
+            mcp.handle_tool_call("prism_list_models", {})
+        joined = "\n".join(cm.output)
+        self.assertIn("tool call", joined)
+        self.assertIn("prism_list_models", joined)
+
+    def test_dispatch_logs_the_method_and_id(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
+            with self.assertLogs("prism.mcp", level="DEBUG") as cm:
+                mcp.call_prism_server("hi", model="qwen")
+        joined = "\n".join(cm.output)
+        self.assertIn("call_prism_server", joined)
+        self.assertIn("qwen", joined)
+
+    def test_fallback_trigger_logs_a_warning(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")), \
+             patch("prism.catalog.list_ollama_models", return_value=[]):
+            with self.assertLogs("prism.mcp", level="WARNING") as cm:
+                mcp.call_prism_server("hi", model="nonexistent-model")
+        joined = "\n".join(cm.output)
+        self.assertIn("falling back to the direct engine", joined)
+
+    def test_http_error_logs_a_warning(self):
+        import io
+        err_body = io.BytesIO(b'{"error":{"message":"boom"}}')
+        http_err = urllib.error.HTTPError("http://localhost:5272/v1/chat/completions", 500, "Server Error", {}, err_body)
+        with patch("urllib.request.urlopen", side_effect=http_err):
+            with self.assertLogs("prism.mcp", level="WARNING") as cm:
+                mcp.call_prism_server("hi", model="qwen")
+        joined = "\n".join(cm.output)
+        self.assertIn("call_prism_server failed", joined)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -7,6 +7,7 @@ code generation, code review, model listing, and GPU telemetry to AI agents.
 
 import atexit
 import json
+import logging
 import os
 import sys
 import threading
@@ -19,6 +20,12 @@ from prism.catalog import ModelCatalog, pick_default_model, DEFAULT_FALLBACK_MOD
 from prism.telemetry import get_gpu_info
 
 PRISM_DEFAULT_URL = os.environ.get("PRISM_BASE_URL", "http://localhost:5272/v1")
+
+# Traces tool-call dispatch and `call_prism_server`'s fallback behavior, mirroring `prism/acp.py`'s
+# `logging.getLogger("prism.acp")` (and `prism/server.py`'s `logging.getLogger("prism.server")`)
+# convention. The operator-facing stderr banner/auto-stop notice already in this module stay as
+# plain `sys.stderr` writes; these are standard `logging` calls a caller can configure or redirect.
+logger = logging.getLogger("prism.mcp")
 
 # With no server to talk to, tool calls run the model inside this process. It stays loaded between calls (loading takes seconds),
 # and is released after this much idle time so it does not hold VRAM against a `prism serve` started later.
@@ -83,6 +90,7 @@ def _schedule_idle_unload() -> None:
     with _state_lock:
         if _idle_timer is not None:
             _idle_timer.cancel()
+        logger.debug("idle-unload timer armed: %.0fs", IDLE_UNLOAD_SEC)
         _idle_timer = threading.Timer(IDLE_UNLOAD_SEC, _manager.unload)
         _idle_timer.daemon = True
         _idle_timer.start()
@@ -104,6 +112,7 @@ def _schedule_auto_stop() -> None:
             _auto_stop_timer.cancel()
 
         def _auto_stop() -> None:
+            logger.info("PRISM_MCP_AUTO_STOP_SEC reached (%gs); exiting", AUTO_STOP_SEC)
             sys.stderr.write(
                 f"💎 Prism MCP Server: PRISM_MCP_AUTO_STOP_SEC reached ({AUTO_STOP_SEC:g} s); exiting.\n"
             )
@@ -135,6 +144,7 @@ def call_prism_server(
 
     if not model:
         model = pick_default_model(all_models) or DEFAULT_FALLBACK_MODEL_ID
+    logger.debug("call_prism_server: model=%s", model)
 
     messages = []
     if system:
@@ -181,9 +191,11 @@ def call_prism_server(
         hint = ""
         if "insufficient_resources" in detail:
             hint = "\nHint: Model load was refused due to resource limits. Override with PRISM_RESOURCE_CHECK=off or adjust memory reserves."
+        logger.warning("call_prism_server failed (HTTP %s): model=%s", http_ex.code, model)
         return f"Error: Prism server responded {http_ex.code}: {detail}{hint}"
     except urllib.error.URLError:
         # Fallback to direct engine generation if server is offline
+        logger.warning("prism serve unreachable; falling back to the direct engine: model=%s", model)
         try:
             resolved = catalog.resolve_model(model)
         except ValueError as ex:  # AmbiguousModelError
@@ -206,13 +218,16 @@ def call_prism_server(
                 from prism.resources import InsufficientResourcesError
                 if isinstance(engine_ex, InsufficientResourcesError) or "insufficient_resources" in str(engine_ex).lower():
                     hint = "\nHint: Model load refused due to resource limits. Override with PRISM_RESOURCE_CHECK=off."
+                logger.warning("direct engine failed: model=%s error=%s", model, engine_ex)
                 return f"Error executing direct ONNX engine for model '{model}': {engine_ex}{hint}"
 
+        logger.warning("no local ONNX model to fall back to: model=%s", model)
         return (
             f"Error: Could not connect to Prism inference server at {base_url}.\n"
             f"Start the server with: 'prism serve --port 5272'"
         )
     except Exception as ex:
+        logger.warning("call_prism_server failed: model=%s error=%s", model, ex)
         return f"Error executing Prism completion: {ex}"
 
 
@@ -306,6 +321,7 @@ def handle_list_tools() -> List[Dict[str, Any]]:
 
 def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
     """Dispatches MCP tool call requests."""
+    logger.debug("tool call: name=%s", name)
     catalog = _catalog()
 
     if name == "prism_ask_coder":
@@ -378,6 +394,7 @@ def run_mcp_server():
     """Main stdio JSON-RPC 2.0 loop."""
     sys.stderr.write("💎 Prism MCP Server starting on stdio...\n")
     sys.stderr.flush()
+    logger.info("prism mcp starting on stdio")
     _schedule_auto_stop()  # arm the daemon timer; reset below on every tools/call
 
     for line in sys.stdin:
@@ -393,6 +410,7 @@ def run_mcp_server():
         req_id = req.get("id")
         method = req.get("method")
         params = req.get("params", {})
+        logger.debug("dispatch: method=%s id=%s", method, req_id)
 
         if method == "initialize":
             resp = {

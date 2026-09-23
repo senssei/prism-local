@@ -26,6 +26,7 @@ Tests and reviews cite these by number. Changing one needs operator approval.
 | I6 | **MCP never touches user files.** The MCP tools generate, list, report status and benchmark; they do not read or write the user's files. |
 | I7 | **Templates are sandboxed.** A model's `chat_template` is rendered only inside `ImmutableSandboxedEnvironment`; a template that fails or is blocked is logged and replaced by the built-in format. |
 | I8 | **Tests are hermetic.** They use fakes (`FakeEngine`, `FakeOg`), temp directories and `create_server(port=0)`; only `tests/test_prism_gpu_integration.py` uses hardware, and it skips itself. |
+| I9 | **ACP agent never touches user files or runs commands.** A `prism acp` model tool call that wants to read or write a file, or run a command, is mediated by the ACP client's `fs/*` or `terminal/*` capabilities only; the agent itself never opens a file, never spawns a process, and never reads a path directly (matching intent.md §3.7 and the spirit of I6 for MCP). |
 
 ## 3. Failure modes (current behavior)
 
@@ -343,7 +344,7 @@ Tests and reviews cite these by number. Changing one needs operator approval.
       wins, and a `session/cancel` that arrives after is a silent no-op (idempotent; ACP does not require an
       acknowledgement for `session/cancel`, it is a notification). A cancel that arrives before any content has been
       generated still appends `{"role": "assistant", "content": ""}` to `session.messages` (rather than nothing at
-      all) — an empty turn, not a missing one, so strict user/assistant alternation (I7) holds for the next prompt.
+      all) — an empty turn, not a missing one, so strict user/assistant alternation holds for the next prompt.
     - **Errors** (backend unavailable, resource limits, template render failure, context length exceeded — the same
       failure modes `docs/api.md` Errors table lists for `/v1/chat/completions`) resolve the `session/prompt` request with
       a JSON-RPC error object, `code: -32000`, `message` naming the underlying Prism error (HTTP status code and body, or
@@ -351,7 +352,7 @@ Tests and reviews cite these by number. Changing one needs operator approval.
       behind I1 and P11. On any such error, the user turn appended at the start of this prompt is popped back off
       `session.messages` before the error is sent, so the session's history has no unanswered, dangling user turn — the
       next `session/prompt` on the same session starts from the last *complete* exchange, not from two consecutive user
-      turns (which would break strict alternating-role chat templates, I7).
+      turns (which would break strict alternating-role chat templates).
   - **`session/cancel`** (client→agent, **notification**, no `id`, no response): params `{"sessionId": str}`. Sets
     `cancel_event` for that session if it exists and has a prompt in flight; unknown or idle session ids are ignored
     (idempotent, matches `/v1/unload`'s idempotence style).
@@ -409,21 +410,125 @@ Tests and reviews cite these by number. Changing one needs operator approval.
     was appended (e.g. `_send_result` itself raising), the completed answer stays in history and only the response to
     the client is lost, rather than silently discarding the model's actual answer and leaving the same one dangling
     unanswered user turn the pop was introduced to prevent, just via a different trigger.
+  - **Logging.** `logging.getLogger("prism.acp")` traces a session's lifecycle by `session_id`/`req_id`, mirroring
+    `prism/server.py`'s `logging.getLogger("prism.server")` convention: `session/new` at `INFO` (session id, resolved
+    model, `cwd`); `session/prompt` accept/reject, start and finish at `DEBUG`; a fallback to the direct engine
+    (`prism serve` unreachable) at `WARNING`, since it is operationally significant even though the request still
+    succeeds; a failed `session/prompt` at `WARNING`; `session/cancel` and the per-message `_dispatch` routing at
+    `DEBUG`. The module's existing operator-facing stderr banner/notices (the startup line, `_write`'s
+    dropped-response notice, `_handle_line`'s dropped-malformed-request notice) are kept as plain `sys.stderr` writes
+    *and* now also emit the equivalent `logging` call (`WARNING` for the two drop cases), so every stderr notice has a
+    `logging`-visible counterpart without changing the stderr output callers may already depend on. No new environment
+    variable or CLI flag — standard `logging` configuration (handlers, level) applies, same as anywhere else in Prism
+    that uses the `logging` module. `prism/mcp.py` got the equivalent treatment in the same pass: `logging.getLogger
+    ("prism.mcp")` traces `tools/call` dispatch and `call_prism_server`'s fallback/error paths at `DEBUG`/`WARNING`,
+    though `mcp.py` predates Phase 12 and is otherwise unrelated to it.
   - **`prism connect acp`**: mirrors `prism connect mcp --target ...` — prints (and with `--write`, merges into) a Zed
     `settings.json` `agent_servers` entry pointing at `prism acp` (no network config needed; ACP is stdio-launched by the
     editor, like MCP). `docs/integrations.md` gets an "ACP (Zed)" section next to "MCP server" documenting the table of
     methods above and the connector command.
-  - **Not yet planned** (tracked in `plan.md` Phase 3 backlog, gated by `intent.md` non-goal §4.5 until promoted): fs-mediated
-    `session/prompt` tool calls (`fs/read_text_file`, `fs/write_text_file`, agent-initiated `session/update` of type
-    `"tool_call"` / `"tool_call_update"`, and `session/request_permission` before a write) and `terminal/*` command
-    execution. Constraint §3.7 ("no direct file or process access from the ACP agent") only becomes load-bearing once
-    those phases are built; this milestone does no file or process I/O of any kind, so it is vacuously satisfied.
+  - **Not yet planned** (tracked in `plan.md` Phase 3 backlog, gated by `intent.md` non-goal §4.5 until promoted):
+    `terminal/*` command execution (Phase 14). fs-mediated tool calls (`fs/read_text_file`, `fs/write_text_file`,
+    `session/update` `tool_call` / `tool_call_update`, and `session/request_permission` before a write) are promoted
+    to Phase 13 below.
   - No invariant changes (I1–I8 still hold: I2's serialization is unaffected because ACP goes through the same
     `ActiveEngineManager`/HTTP path as every other client; I4 stays stdlib-only — no ACP SDK dependency, hand-rolled
     JSON-RPC like `mcp.py`). Stdlib-only.
   - Docs: `docs/integrations.md` new "ACP (Zed)" section; `docs/cli.md` new `prism acp` and `prism connect acp` entries
     (enforced by `tests/test_docs.py`); `docs/getting-started.md` Environment table gets a row for `$PRISM_ACP_MODEL`.
     `CHANGELOG.md [Unreleased]` gets a `### Added` entry.
+
+### Phase 13: ACP fs-mediated tool calls — `read_file`, `write_file` (`plan.md` Phase 13)
+
+- **Scope**: this phase makes `prism acp` advertise two model tools — `read_file(path)` and `write_file(path, content)` — and
+  execute them by mediating the ACP client's `fs/read_text_file` and `fs/write_text_file` JSON-RPC methods. The ACP agent itself
+  never opens a file or writes to disk; every byte goes through the client. This activates intent.md §3.7 and is the first
+  load-bearing use of new invariant I9.
+- **Tools advertised to the model** (filtered by `clientCapabilities.fs.*` captured during `initialize`):
+  - `read_file(path: str)` → `fs/read_text_file` with `params={"sessionId", "path"}` (optional `line`, `limit` from the model
+    arguments when present). Result `{content: str}` is fed back to the model as a `role:"tool"` message.
+  - `write_file(path: str, content: str)` → `session/request_permission` (always — see below), then
+    `fs/write_text_file` with `params={"sessionId", "path", "content"}` on `allow_once`. Result is `{}` on success.
+  - Tool definitions follow the OpenAI function-calling JSON-schema shape (`{"type":"function","function":{"name","description","parameters"}}`)
+    so `prism.templates.render_prompt(resolved, messages, tools)` and the existing OpenAI-compatible server path accept them
+    verbatim.
+- **Capability negotiation**:
+  - During `initialize`, capture `params.clientCapabilities.fs.readTextFile` (default `False`) and `.writeTextFile` (default `False`)
+    into a per-connection map. Store on the `_Session` so they survive `session/new`. If `readTextFile` is `False`, `read_file`
+    is omitted from the tool list; if `writeTextFile` is `False`, `write_file` is omitted (no point advertising a tool that can
+    never succeed). If both are absent, no tools are advertised — the agent runs as in Phase 12.
+  - If the client does not advertise `clientCapabilities.fs` at all (older clients), treat both capabilities as `False`.
+- **Tool-call loop** in `_run_prompt`:
+  - Replaces the Phase 12 single-shot flow with a bounded loop, max iterations `MAX_ACP_TOOL_ROUNDS` (default `8`,
+    non-configurable in v1). The model request re-renders with the same tool list and the new `tool` message appended.
+  - On each loop iteration: `prism.tools.parse_tool_calls(text)` extracts `text` (forwarded as `agent_message_chunk`) and `calls`
+    (forwarded as `session/update` `tool_call`). If no calls, resolve `session/prompt` with `stopReason:"end_turn"`. If calls
+    exist, execute them in order (see permission flow below), append `role:"tool"` messages with the result, emit
+    `tool_call_update` with `status:"completed"` or `"failed"`, then iterate.
+  - On exceeding `MAX_ACP_TOOL_ROUNDS`, resolve with `stopReason:"end_turn"` after a final `agent_message_chunk` summarizing
+    "tool loop budget exhausted".
+- **Notification shape**:
+  - `tool_call`: `{sessionUpdate: "tool_call", toolCallId: <id>, title: <human-readable>, kind: "read"|"edit", status: "in_progress"}`.
+    `kind:"read"` for `read_file`, `kind:"edit"` for `write_file` (matches ACP `ToolKind`).
+  - `tool_call_update` (success): `{sessionUpdate: "tool_call_update", toolCallId, status: "completed", content: [...]}` with one
+    `{"type":"content","content":{"type":"text","text": <file content or short success note>}}` entry.
+  - `tool_call_update` (failure): same shape with `status:"failed"` and a content entry carrying the error text.
+  - `toolCallId` is a per-session monotonic id (`f"call_{session_id}_{n:04d}"`).
+- **Permission flow** (`session/request_permission`):
+  - Sent **before every `write_file`** (per Phase 3 backlog text: "permission before a write"). The spec language is "MAY
+    request permission" but the agent always does for `kind:"edit"` tools; reads and `kind:"think"` are auto-allowed.
+  - Request params: `{sessionId, toolCall: {toolCallId, title: "Write {path}", kind: "edit"}, options: [{optionId: "allow_once",
+    name: "Allow once", kind: "allow_once"}, {optionId: "reject_once", name: "Reject", kind: "reject_once"}]}`.
+  - Response handling:
+    - `{"outcome":{"outcome":"selected","optionId":"allow_once"}}` → proceed with `fs/write_text_file`.
+    - `{"outcome":{"outcome":"selected","optionId":"reject_once"}}` → fold `"permission denied"` into the tool result, do NOT
+      call `fs/write_text_file`, mark the tool call `status:"failed"`. The model can react.
+    - `{"outcome":{"outcome":"cancelled"}}` → resolve `session/prompt` with `stopReason:"cancelled"` (the prompt turn has been
+      cancelled by the client).
+    - Any JSON-RPC `error` → mark the tool call `status:"failed"`, fold the error message into the tool result.
+- **Bidirectional JSON-RPC over stdio** (`prism/acp.py`):
+  - The Phase 12 main loop is read-only (it answers client requests). Phase 13 adds an outbound request path: `_send_request(method,
+    params) -> dict | raises` that assigns a monotonic `id` (per-process counter), writes
+    `{"jsonrpc":"2.0","id":N,"method":M,"params":P}` to stdout, and parks a `threading.Event`-and-result future in a module-level
+    dict keyed by id.
+  - The main read loop, on receiving a message whose top-level `id` is in the pending dict, sets the future's result and removes
+    the entry; a JSON-RPC `error` raises a typed exception (`AcpClientError(code, message, data)`) so callers can distinguish a
+    client-side error from a transport error. Notification frames (no `id`) and request frames (have `id`, expect a reply) are
+    dispatched as today; response frames (have `id`, no `method`) now wake the pending future.
+  - Pending futures are cancelled (with a clear error) if the connection drops before the reply arrives.
+- **Capability-mismatch fallback**: if a tool call arrives for a capability the client did not advertise (defense-in-depth — the
+  capability filter on advertised tools is the primary defense), the agent returns a `role:"tool"` message of
+  `{"error": "fs.readTextFile is not advertised by the client"}` and emits `tool_call_update` with `status:"failed"`. The model
+  can adapt instead of producing a JSON-RPC `error` to the client.
+- **Cancellation**: between any two loop iterations and immediately before each `fs/*` and `session/request_permission` round
+  trip, `cancel_event.is_set()` is checked. If set, resolve `session/prompt` with `stopReason:"cancelled"` and discard the
+  pending future.
+- **Failure modes**:
+  - `fs/read_text_file` returns `{"error":{...}}` → JSON-RPC error → tool result message carries the error text; tool_call_update
+    `status:"failed"`; loop continues.
+  - `fs/read_text_file` / `fs/write_text_file` returns successfully with non-schema-conforming data → tool result message carries
+    a short diagnostic; `status:"failed"`.
+  - `session/request_permission` returns `cancelled` → `stopReason:"cancelled"`, no further model calls in this turn.
+  - `cancel_event` set during a `_send_request` round trip → pending future is cancelled; `session/prompt` resolves with
+    `stopReason:"cancelled"`.
+  - Tool loop exceeds `MAX_ACP_TOOL_ROUNDS` → `stopReason:"end_turn"` after a final summary chunk (not an error).
+- **Environment**: no new env vars in v1 (`MAX_ACP_TOOL_ROUNDS` is module-level). Future work may add `$PRISM_ACP_MAX_TOOL_ROUNDS`
+  to let operators tune the budget; Phase 13 keeps it constant.
+- **Constraints upheld**:
+  - I1 (device honesty): unaffected — same model resolution path.
+  - I2 (one resident model, one lock): unaffected — `fs/*` round-trips do not touch the engine.
+  - I4 (no runtime deps): unaffected — stdlib only (`threading.Event`, `json`, `itertools.count`); no new imports.
+  - I5 (safe defaults): unaffected — ACP is stdio only.
+  - I6 (MCP never touches files): unaffected — applies to `prism mcp`.
+  - **I9 (new): ACP agent never touches user files or runs commands.** First load-bearing use; tests assert this by faking
+    `open()` and `subprocess` and confirming neither is called from any code path reachable by `prism acp` tool execution
+    (test: `tests/test_prism_acp.py::TestAcpAgentNeverTouchesFiles`).
+  - I8 (hermetic tests): all `tests/test_prism_acp.py` tests for Phase 13 mock `_send_request` and `_server_delta_stream`;
+    no hardware, no network, no model files.
+- **No invariant violation** beyond the explicit addition of I9 (which formalizes intent.md §3.7).
+- **Docs**: `docs/integrations.md` "ACP (Zed)" section gains a "fs-mediated tool calls" subsection listing the two tools, the
+  `session/update` `tool_call` / `tool_call_update` shapes, and the `session/request_permission` UX; `CHANGELOG.md [Unreleased]`
+  gets a `### Added` entry for Phase 13; `tests/test_docs.py` enforces the docs link.
 
 ### Implemented (Phase 1: Parallel use must not exhaust the machine)
 
