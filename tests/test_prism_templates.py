@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from prism.templates import (TemplateToolRenderError, classify_chat_template, detect_template, flatten_content, format_prompt,
                              jinja_available, read_chat_template, read_tokenizer_tokens, render_chat_template, render_prompt,
-                             resolve_template, template_mode)
+                             resolve_template, supports_tools, template_mode)
 
 # Chat templates copied from Microsoft's ONNX Runtime GenAI models (the same files `prism pull` downloads).
 PHI35_TEMPLATE = (
@@ -315,6 +315,53 @@ class TestTemplateToolRenderError(ModelFolder):
         resolved = self.folder(GOOD_TOOLS_TEMPLATE, "chatml")
         out = render_prompt(resolved, CONVERSATION, tools=[TOOL])
         self.assertIn("TOOLS=get_weather;", out)
+
+
+@unittest.skipUnless(jinja_available(), "needs the optional jinja2; without it supports_tools always returns False")
+class TestSupportsTools(ModelFolder):
+    """Phase 10 / P14 (spec.md): `supports_tools` is a structural check on the chat template,
+    not a `re.search(r"\\btools\\b", text)` text scan. The structural check matches:
+
+        - `{{ tools }}` (a Jinja expression of the symbol), or
+        - `{% if tools %}` / `{% for tools in ... %}` (Jinja control flow over the symbol).
+
+    Today, the text scan returns True for templates that just *mention* `tools` in a comment or
+    prose without rendering them — the agent path therefore claims support on models whose
+    template won't actually pass tools through. The new check matches only real usage.
+    """
+
+    def test_true_when_template_uses_tools_in_jinja_expression(self):
+        resolved = self.folder("{{ tools }}", "chatml")
+        self.assertTrue(supports_tools(resolved),
+                        f"{{ tools }} is a Jinja expression of the symbol; supports_tools must be True. "
+                        f"Template-mode was '{template_mode()}'.")
+
+    def test_true_when_template_uses_tools_in_jinja_if(self):
+        resolved = self.folder("{% if tools %}has{% else %}hasnt{% endif %}", "chatml")
+        self.assertTrue(supports_tools(resolved),
+                        "{% if tools %} is a Jinja control flow over the symbol; supports_tools must be True.")
+
+    def test_true_when_template_uses_tools_in_jinja_for(self):
+        resolved = self.folder("{% for t in tools %}{{ t.name }}{% endfor %}", "chatml")
+        self.assertTrue(supports_tools(resolved),
+                        "{% for t in tools %} is a Jinja control flow over the symbol; supports_tools must be True.")
+
+    def test_false_when_template_documents_tools_in_prose_only(self):
+        # Regression guard: today's `re.search(r"\\btools\\b", text)` returns True for prose; the new
+        # structural check must not.
+        resolved = self.folder("{# tools are optional; the caller may omit them #}", "chatml")
+        self.assertFalse(supports_tools(resolved),
+                         "# tools are optional # mentions the symbol in prose but never uses it; must be False.")
+
+    def test_false_when_template_uses_a_different_symbol(self):
+        resolved = self.folder("{{ tool_registry }}", "chatml")
+        self.assertFalse(supports_tools(resolved),
+                         "tool_registry is a different symbol; supports_tools must be False.")
+
+    def test_false_when_template_lacks_chat_template_file(self):
+        # Empty `path` resolves to ""; `read_chat_template` returns ""; `supports_tools` is False.
+        resolved = {"id": "m", "path": self.dir, "template": "chatml"}  # no tokenizer_config.json written
+        self.assertFalse(supports_tools(resolved))
 
 
 if __name__ == "__main__":

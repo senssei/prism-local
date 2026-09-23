@@ -7,6 +7,9 @@ versions may include breaking changes).
 ## [Unreleased]
 
 ### Changed
+- `prism.cli` now reads `PRISM_API_KEY` (and, by next phase, the rest of the `PRISM_*` vars) through a typed `EnvConfig` dataclass in `prism/env_config.py`. CLI flags keep precedence over the env. Defaults are unchanged for users; a typo in a var is caught once at startup instead of at first use.
+- `tool_choice` is no longer silently rewritten to `"auto"` for every non-`"none"` value. The four accepted shapes (`"none" | "auto" | "required" | {"type": "function", "function": {"name": ...}}`) are honored as OpenAI specifies: the structured form narrows `tools` to the single named tool (a name not in the list is a hard `400 invalid_request_error` before the engine is touched; the unknown shape is also a `400`). The previous behaviour silently passed the full `tools` list to the model even when the caller explicitly named one tool.
+- `prism.templates.supports_tools` no longer uses `re.search(r"\btools\b", text)`. The check is now structural: the `tools` symbol must appear inside a Jinja expression (`{{ ... tools ... }}`) or a Jinja block (`{% ... tools ... %}`, covering `{% if tools %}`, `{% for t in tools %}`, `{% set t = tools %}`, etc.). Templates that only mention `tools` in a `{# comment #}` or in prose no longer falsely report support (no False-Positives on neighbouring text); the same models as before reach the `400 tools_not_supported` path because real Jinja usage still matches.
 - `PRISM_PREFILL_CHUNK` now defaults to `1024` tokens (`0` or `off` restores whole-prompt prefill). Without it, one long prompt left most of the GPU memory
   held after the model was unloaded, and the next model loaded then ran about 25 times slower (qwen2.5-coder-7b after a 4200-token Phi-4-mini prompt: TTFT
   83 s and 1.2 tok/s, against 0.34 s and 30 tok/s with the default).
@@ -18,6 +21,16 @@ versions may include breaking changes).
 - `503 insufficient_resources` now carries a structured `error.holder = {"pid", "model"}` when the model-load lock is held by another process, alongside the existing prose in `error.message`. Orchestrators (e.g. `benchrig --runtime prism`) can read the field to decide between wait / drain / smaller-model.
 
 ### Added
+- `prism acp`: a stdio server speaking the Agent Client Protocol (ACP), so ACP-capable editors (Zed and others) can run a
+  streamed, cancellable chat session against a local, zero-cost Prism model. First milestone: `initialize`, `session/new`,
+  `session/prompt` (plain-text content blocks only) and `session/cancel` — no file or terminal access yet. Falls back to an
+  in-process ONNX engine when `prism serve` is unreachable, same as `prism mcp`. New `$PRISM_ACP_MODEL` env var and
+  `prism connect acp [--write] [--test]` to configure Zed's `agent_servers` settings. A malformed-but-JSON-valid message
+  (wrong-typed `params`/`prompt`) returns a JSON-RPC error instead of crashing the stdio loop; a failed generation no
+  longer leaves a dangling, unanswered user turn in the session history; `initialize`'s `protocolVersion` rejects
+  booleans and negative numbers instead of echoing them back. `prism.catalog.DEFAULT_FALLBACK_MODEL_ID` centralizes the
+  hardcoded model id `prism mcp` and `prism acp` fall back to when no local models are installed at all.
+- Centralised env-var schema (`prism/env_config.py`, stdlib only): one frozen `EnvConfig` dataclass declaring every `PRISM_*` variable with its type, default, and `__post_init__` validator. `EnvConfig.from_env(...)` builds an instance from a Mapping; `EnvConfig.from_env_file(path)` parses a hand-rolled `KEY=VALUE` file (whitespace, `# comment`, double/single-quoted values); `load_config()` runs at CLI / server startup, fails fast on bad values (one `ValueError` listing every problem), and emits one `logging.warning` for any unknown `PRISM_*` key. No runtime dependency — no `kev`, no `pydantic-settings`, no `python-dotenv`. `.env` file loading is opt-in only: `PRISM_ENV_FILE=/path/to/.env` (security: never auto-discover a file the operator did not name).
 - Reasoning separation: `prism.reasoning` module extracting `<think>...</think>` blocks into `message.reasoning_content` (and streaming `delta.reasoning_content`) for OpenAI-compatible `/v1/chat/completions` across ONNX and Ollama backends, while keeping raw output intact for legacy `/v1/completions`.
 - Thread control: `PRISM_THREADS` environment variable to set intra-op thread count via session_options overlay on ONNX models.
 - Diagnostics and telemetry: `prism status` displays system RAM and swap usage; model loads log memory deltas ("VRAM +N MB, RAM +N MB"); `prism doctor` inspects Windows WSL2 `.wslconfig` and warns if `memory=` or `autoMemoryReclaim=gradual` are missing.

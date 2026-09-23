@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-from prism.catalog import ModelCatalog
+from prism.catalog import ModelCatalog, pick_default_model, DEFAULT_FALLBACK_MODEL_ID
 from prism.telemetry import get_gpu_info
 
 PRISM_DEFAULT_URL = os.environ.get("PRISM_BASE_URL", "http://localhost:5272/v1")
@@ -129,9 +129,7 @@ def call_prism_server(
     all_models = catalog.list_all_models(include_ollama=True)
 
     if not model:
-        # Prefer CUDA ONNX model if available, else first available
-        cuda_models = [m["id"] for m in all_models if "cuda" in m.get("device", "").lower()]
-        model = cuda_models[0] if cuda_models else (all_models[0]["id"] if all_models else "Phi-4-mini-instruct-cuda-gpu")
+        model = pick_default_model(all_models) or DEFAULT_FALLBACK_MODEL_ID
 
     messages = []
     if system:

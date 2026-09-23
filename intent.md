@@ -1,7 +1,7 @@
 # Intent: Prism (`prism-local`)
 
-> **Status: approved by the operator, 2026-09-20.** Written from `README.md`, `docs/` and the operator's private notes. The operator
-> approves any change to this file (see `AGENTS.md`, operator gates).
+> **Status: approved by the operator, 2026-09-20; ACP agent addition (§2 outcome, §3.7, §4.5, §5) approved 2026-09-23.** Written from
+> `README.md`, `docs/` and the operator's private notes. The operator approves any change to this file (see `AGENTS.md`, operator gates).
 
 ## 1. Problem
 
@@ -20,6 +20,10 @@ One command line and one OpenAI-compatible endpoint on a fixed port (`127.0.0.1:
 ready-made connectors for Cursor, Cline and MCP. Prism tells the truth about where a model runs, and its defaults are safe for a single-user
 machine. Coding agents (including the AI development workflow in this repository) can rely on it as a local, zero-cost model backend.
 
+Prism can also *be* the coding agent an editor drives: `prism acp` speaks the Agent Client Protocol (ACP) so an ACP-capable editor (Zed and
+others) can run a full agentic session — prompts, streamed responses, file edits, shell commands — backed by a local, zero-cost model, with
+the editor mediating every file and process action.
+
 ## 3. Constraints
 
 1. **Platform**: Linux and WSL2 only. Python 3.10+.
@@ -28,6 +32,9 @@ machine. Coding agents (including the AI development workflow in this repository
 4. **Tests need no hardware**: no GPU, Ollama, network or model files, so they run in CI.
 5. **Safe by default**: loopback only, no CORS, no API key needed on loopback, and a warning when that is changed unsafely.
 6. **Reference machine**: WSL2 with 32 GB RAM and an RTX 5070 (12 GB) that is shared with the Windows desktop and other GPU applications.
+7. **No direct file or process access from the ACP agent.** `prism acp` never opens a file or spawns a process itself; edits and commands go
+   through the ACP client's `fs/*` and `terminal/*` capabilities, so the editor's own permission model is the only gate — matching the spirit
+   of invariant I6 for MCP.
 
 ## 4. Non-goals
 
@@ -35,6 +42,8 @@ machine. Coding agents (including the AI development workflow in this repository
 2. Windows or macOS native support, TLS termination, or hosting Prism as a service for other people.
 3. Training, fine-tuning, or model hosting. Prism runs models that exist; `prism convert` only wraps ONNX Runtime GenAI's builder.
 4. Replacing Ollama or Foundry Local. Prism sits in front of engines; it does not compete with them.
+5. Multi-agent orchestration, ACP session persistence across process restarts, or an ACP agent that hosts its own MCP servers. The first ACP
+   milestone is one editor, one session, one model at a time.
 
 ## 5. Success criteria
 
@@ -46,3 +55,5 @@ machine. Coding agents (including the AI development workflow in this repository
 | `prism doctor` names the cause when CUDA cannot be used | `docs/devices.md`; `tests/test_doctor.py` |
 | Parallel use cannot exhaust VRAM or RAM without a clear refusal | `plan.md` Phase 1 (not yet done) |
 | A change is only "done" when the deterministic gate passes | `scripts/sdlc_check.py`, `.githooks/pre-commit` |
+| An ACP-capable editor can run a full coding session (prompt, edit, run) against a Prism-served model, with the editor mediating all
+  fs/terminal access | `docs/integrations.md`; `tests/test_prism_acp.py` |

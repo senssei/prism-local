@@ -1,7 +1,7 @@
 # CLI reference
 
 ```text
-prism [-h] {status,doctor,list,pull,run,chat,serve,benchmark,mcp,connect} ...
+prism [-h] {status,doctor,list,pull,run,chat,serve,benchmark,mcp,acp,connect} ...
 ```
 
 Model arguments accept an id, a name, a path to a model folder, or a **unique** substring (`prism run phi-4-mini …`).
@@ -120,6 +120,14 @@ applications share the GPU). If the model did not run on the GPU, it says so and
 
 Runs Prism as a stdio [Model Context Protocol](integrations.md#mcp-server) server. Normally launched by an MCP client.
 
-## `prism connect {cursor,cline,mcp}`
+## `prism acp`
+
+Runs Prism as a stdio [Agent Client Protocol](integrations.md#acp-zed) agent. Normally launched by an ACP-capable editor
+(e.g. Zed). First milestone: a plain-text, streamed, cancellable chat session — no file or terminal access yet. Model
+selection: `$PRISM_ACP_MODEL`, else a CUDA ONNX model if one is installed, else the first available model, else the
+hardcoded default `Phi-4-mini-instruct-cuda-gpu` if no local models are installed at all (the session still opens; the
+first prompt then fails with a normal generation error).
+
+## `prism connect {cursor,cline,mcp,acp}`
 
 Prints setup instructions and writes client configuration. See [Integrations](integrations.md).

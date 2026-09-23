@@ -75,6 +75,14 @@ class TestServeArgs(unittest.TestCase):
         self.assertEqual(start.call_args.kwargs["api_key"], "flag")
 
 
+class TestAcpCommand(unittest.TestCase):
+    def test_acp_command_runs_the_acp_server(self):
+        with patch("prism.acp.run_acp_server") as run:
+            code, _ = run_cli("acp")
+        self.assertEqual(code, 0)
+        run.assert_called_once_with()
+
+
 class TestDeviceFlag(unittest.TestCase):
     def test_flag_sets_environment_for_the_engine(self):
         seen = {}

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
+from prism.catalog import AmbiguousModelError, ModelCatalog, pick_default_model, planned_device
 from tests.fakes import make_model
 
 
@@ -139,6 +139,25 @@ class TestPrismCatalog(unittest.TestCase):
     def test_cached_list_is_not_mutated_by_callers(self):
         self.catalog.list_all_models(include_ollama=True)  # extends the returned list internally
         self.assertEqual(len(self.catalog.discover_onnx_models()), 3)
+
+
+class TestPickDefaultModel(unittest.TestCase):
+    def test_empty_list_returns_none(self):
+        self.assertIsNone(pick_default_model([]))
+
+    def test_prefers_a_cuda_model_over_a_non_cuda_one(self):
+        models = [
+            {"id": "cpu-model", "device": "CPU"},
+            {"id": "cuda-model", "device": "CUDA (GPU)"},
+        ]
+        self.assertEqual(pick_default_model(models), "cuda-model")
+
+    def test_falls_back_to_the_first_model_when_none_is_cuda(self):
+        models = [
+            {"id": "ollama:phi4-mini:latest", "device": "CPU/GPU"},
+            {"id": "cpu-model", "device": "CPU"},
+        ]
+        self.assertEqual(pick_default_model(models), "ollama:phi4-mini:latest")
 
 
 if __name__ == "__main__":

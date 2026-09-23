@@ -39,6 +39,17 @@ def planned_device(model: Dict[str, Any]) -> str:
     return "CUDA (GPU)" if get_gpu_info().get("available") else "CPU"
 
 
+DEFAULT_FALLBACK_MODEL_ID = "Phi-4-mini-instruct-cuda-gpu"
+
+
+def pick_default_model(all_models: List[Dict[str, Any]]) -> Optional[str]:
+    """Picks a model id when the caller did not name one: prefer a CUDA ONNX model, else the first available model."""
+    if not all_models:
+        return None
+    cuda_models = [m["id"] for m in all_models if "cuda" in m.get("device", "").lower()]
+    return cuda_models[0] if cuda_models else all_models[0]["id"]
+
+
 class AmbiguousModelError(ValueError):
     """Raised when a model name matches more than one local model."""
 

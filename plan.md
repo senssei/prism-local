@@ -65,13 +65,20 @@ Spec: `spec.md` section 4 (P7). Status: Phase 2 complete; review-2 found 7 issue
 - [ ] CUDA: `stop`, context clamp, `_find_stripped_markers` and tool calling on a real model; run `tests/test_prism_gpu_integration.py`.
 - [ ] Re-measure the Phi-4-mini benchmark in `README.md` (prompt changed, chunk 1024 is now the default).
 
+### Future ACP milestones (gated by `intent.md` non-goal §4.5; promote one at a time after Phase 12 ships)
+- [ ] Phase 13: fs-mediated tool calls in `session/prompt` — agent-initiated `fs/read_text_file` / `fs/write_text_file`
+  requests to the client, `session/update` of type `tool_call` / `tool_call_update`, and `session/request_permission`
+  before a write. Needs its own `spec.md` entry before it starts.
+- [ ] Phase 14: `terminal/*` command execution mediated by the ACP client, plus the permission-request flow for running a
+  command. Needs its own `spec.md` entry before it starts.
+
 ### Behavior gaps (each needs a `spec.md` entry first)
-- [ ] Tool calling: no silent fallback when the template render with `tools` fails (400/500 instead of answering without tools).
-- [ ] `supports_tools` is a text heuristic; `tool_choice` other than `none` is ignored; streaming with `tools` on ONNX is buffered.
-- [ ] `--queue-timeout` does not cancel a waiting request when the client disconnects.
+- [ ] `supports_tools` heuristic → structural check + `tool_choice={"function": {"name": ...}}` narrows tools (→ Phase 10 / P14, in progress).
+- [ ] `--queue-timeout` does not cancel a waiting request when the client disconnects. *(Done in Phase 5 / P9; remove on Phase 3 cleanup.)*
 - [ ] Unknown template families (Llama 2, Mistral `[SYSTEM_PROMPT]`, Gemma without a template) fall back to ChatML by name.
 - [ ] Embeddings: token arrays in `input`, `dimensions`; ONNX embeddings are impossible today (ORT GenAI returns none).
 - [ ] Warn (log, `prism doctor`, `GET /v1/models`) when a CPU-exported model runs on CUDA.
+- [ ] Tool calling: no silent fallback when the template render with `tools` fails (400/500 instead of answering without tools). *(Done in Phase 7 / P11; remove on Phase 3 cleanup.)*
 
 ### Small and closed
 - [ ] `--variant`: a CLI test that passes the flag to `pull_model`; add it to the command table in `README.md`.
@@ -138,6 +145,70 @@ Spec: `spec.md` section 4 (P12). Status: implemented, reviewed (gate green, 422 
 
 ---
 
+## Phase 10: `tool_choice` is honored and `supports_tools` is a structural check
+
+Spec: `spec.md` section 4 (P14). Status: implemented (gate green: 434 tests; both items ticked). Items 10.1 and 10.2 land as one commit, matching Phases 4–9. The gap is that `_tools_param` (`prism/server.py`) only special-cases `tool_choice == "none"` today; every other value (including the OpenAI-shaped `{"type":"function","function":{"name":"X"}}`) is silently treated as `"auto"` and the full tools list is sent to the engine even when the caller explicitly named one tool. And `supports_tools` is a `re.search(r"\btools\b", text)` text scan that matches prose as easily as Jinja usages, so a model whose template documents "tools" without rendering them is reported as supporting them. Both are silent-fallback paths on the agent path that intent.md §3.3 calls a bug. `POST /v1/unload` (P8), `POST /v1/drain` (P12), `POST /v1/chat/completions` `400 template_render_failed` (P11), and the `prism serve` Ctrl+C / SIGTERM race (P13) all stay unchanged. No invariant changes (I1–I8 still hold; I1 strengthens for `supports_tools`); stdlib-only.
+
+- [x] 10.1 `prism/server.py` + `prism/templates.py`:
+  - (a) `OpenAIApiHandler._tools_param(req)` (`prism/server.py` ~:335) accepts `tool_choice == {"type":"function","function":{"name": "<tool_name>"}}` and narrows the returned list to the single tool whose `name` matches `<tool_name>`. Any other shape (other than `"none"`, `"auto"`, `"required"`, the structured-function form, or absent) becomes a `400 invalid_request_error` whose message names the four accepted shapes. The docstring now describes the four exactly instead of hiding the auto-fallback behind an internal-name. (b) `prism.templates.supports_tools(resolved)` (`prism/templates.py` ~:244) replaces `re.search(r"\btools\b", text)` with a structural check: a regex matching `tools` inside `{{ ... }}` or `{% ... %}` Jinja blocks (`\{\{[^}]*\btools\b[^}]*\}\}|\{\%[^%]*\btools\b[^%]*%\}`), with word boundaries so `tool_registry`, `tools_dict`, etc. don't match. Templates whose `chat_template.jinja` does not use `tools` in those positions return `False`; templates that do return `True`; templates with no chat template still return `False` (unchanged from the builtin-template-mode branch). Stdlib-only.
+  Tests in `tests/test_prism_server_api.py` (new `TestToolChoice`, sibling to `TestToolsRejected`):
+  - `test_tool_choice_function_narrows_tools_to_named_one` — POST `/v1/chat/completions` with `tools=[get_weather, get_time, send_email]` and `tool_choice={"type":"function","function":{"name":"get_weather"}}`; assert the rendered prompt contains `get_weather;` and does NOT contain `get_time;` or `send_email;`.
+  - `test_tool_choice_unknown_function_name_returns_400` — same setup but `tool_choice={"type":"function","function":{"name":"nonexistent"}}`; assert `400`, `data["error"]["type"] == "invalid_request_error"`, the message names the missing tool, and `FakeEngine.prompts` is empty (the engine was never touched — the lock was never acquired).
+  - `test_tool_choice_invalid_shape_returns_400` — `tool_choice` of `42`, `"sometimes"`, and `["array"]` are all `400` with `data["error"]["type"] == "invalid_request_error"` and a message naming `"tool_choice"`. Engine untouched.
+  - `test_tool_choice_none_still_drops_tools` — regression: `tool_choice="none"` plus non-empty `tools` continues to render without tools (no `TOOLS:` line in `FakeEngine.prompts[-1]`). Guards Phase 7's tests.
+  Tests in `tests/test_prism_templates.py` (new `TestSupportsTools`, sibling to the existing template-render tests):
+  - `test_true_when_template_uses_tools_in_jinja_expression` — `{{ tools }}`; `True`.
+  - `test_true_when_template_uses_tools_in_jinja_if` — `{% if tools %}has{% else %}hasnt{% endif %}`; `True`.
+  - `test_true_when_template_uses_tools_in_jinja_for` — `{% for t in tools %}{{ t.name }}{% endfor %}`; `True` (the case the original Phase-9 plan regex missed; the broader `{% ... tools ... %}` half of the new regex catches both `for t in tools` and `for tools in X`).
+  - `test_false_when_template_documents_tools_in_prose_only` — `{# tools are optional; the caller may omit them #}` (Jinja comment, no Jinja `{%`/`%}` or `{{`/`}}` block around the symbol); `False` (regression: today's `re.search(r"\btools\b", text)` returns `True` here).
+  - `test_false_when_template_uses_a_different_symbol` — `{{ tool_registry }}`; `False` (today returns `True`; new returns `False`).
+  - `test_false_when_template_lacks_chat_template_file` — empty folder; `False` (regression: today's behaviour is preserved).
+
+- [x] 10.2 `docs/api.md` + `CHANGELOG.md`:
+  - `docs/api.md` "Tool calling" gains a paragraph listing the four accepted `tool_choice` shapes (`"none" | "auto" | "required" | {"type": "function", "function": {"name": ...}}`) and explaining the structural `supports_tools` check.
+  - `CHANGELOG.md [Unreleased]` `### Changed` with two bullets: (a) the new `tool_choice={"function":{"name":...}}` narrowing; (b) the structural `supports_tools` check replacing the prose scan.
+  - Tests: `python3 scripts/sdlc_check.py --only docs` (mkdocs strict + changelog gate).
+
+> **Commit note.** Same as Phases 4–9: runtime + tests + docs + changelog land in **one** commit. The red step is `python3 scripts/sdlc_check.py --red tests.test_prism_server_api.TestToolChoice.test_tool_choice_function_narrows_tools_to_named_one`; failing reason must be that `_tools_param` returns the full tools list (assertEqual on a one-element list fails because the captured list has all three tools). Then `tests.test_prism_templates.TestSupportsTools.test_false_when_template_documents_tools_in_prose_only` must also fail (today's `supports_tools` returns `True` on `# tools are optional`, the new structural check returns `False`).
+
+---
+
+## Phase 11: Centralised env-var schema (stdlib-only, no runtime dep)
+
+Spec: `spec.md` section 4 (P15). Status: implemented (gate green: 446 tests, all four items ticked). Items 11.1, 11.2, 11.3, 11.4 land in one commit, matching Phases 4–10. The gap was that 22 `PRISM_*` env vars were read with `os.environ.get(...)` in 31 callsites across 5 modules (`prism/cli.py`, `prism/resources.py`, `prism/templates.py`, `prism/mcp.py`, `prism/server.py`); defaults were duplicated next to each reader, type coercion hand-rolled, and a typo'd var caught silently at first use. The fix introduces `prism/env_config.py` — a single frozen `EnvConfig` dataclass that declares every var with its type, default, and validators — without violating invariant I4 ("No runtime dependencies"). The `.env` file flow is opt-in only via `PRISM_ENV_FILE` (no auto-discovery in CWD — security: never load a file the operator did not name). Phase 11 migrates `prism/cli.py` (1 callsite; the plan overestimated 5 — the line at `cli.py:358` is a write, not a read); the other four modules stay as-is until a follow-up phase migrates them one at a time.
+
+- [x] 11.1 `prism/env_config.py` (new file):
+  - `@dataclass(frozen=True) class EnvConfig` with one field per `PRISM_*` var, each with the right type, default, and a docstring naming the source field. Concrete fields: `api_key: Optional[str] = None`, `base_url: str = "http://127.0.0.1:5272/v1"`, `device: str = "auto"` (`auto|cpu|cuda`), `template: str = "auto"` (must be in `TEMPLATE_MODES`), `queue_timeout: Optional[float] = None`, `max_queue: Optional[int] = None`, `prefill_chunk: int = 1024` (today `0|off` = whole-prompt prefill), `threads: Optional[int] = None`, `load_timeout: float = DEFAULT_LOAD_TIMEOUT_S`, `load_lock: bool = True`, `ram_reserve_mb: float = DEFAULT_RAM_RESERVE_MB`, `vram_reserve_mb: float = DEFAULT_VRAM_RESERVE_MB`, `resource_check: bool = True`, `loop_guard: bool = True`, `mcp_auto_stop_sec: float = 0.0` (0 = disabled), `force_wsl: bool = False`, `wslconfig_path: Optional[str] = None`, `model_dirs: List[str] = field(default_factory=list)`, `python: Optional[str] = None`, `env_file: Optional[str] = None`, `state_dir_override: Optional[str] = None`.
+  - `@classmethod from_env(cls, environ: Optional[Mapping[str, str]] = None) -> EnvConfig` reads each var, coerces (str → int / float / bool / `List[str]`), and constructs. Raises `ValueError` listing every bad field at once (collect errors, don't fail-fast on the first). Stricter semantics than today: `PRISM_DEVICE=ROGUE` raises; `PRISM_PREFILL_CHUNK=abc` raises; empty strings fall back to defaults.
+  - `@classmethod from_env_file(cls, path: str, environ: Optional[Mapping[str, str]] = None) -> EnvConfig` parses a hand-rolled `KEY=VALUE` reader (whitespace, `# comment`, blank lines, optional double-quoted value, `\\`-escape inside quotes). Stdlib only — no `python-dotenv`.
+  - `__post_init__` validates ranges and enums (e.g. `PRISM_PREFILL_CHUNK >= 0`, `PRISM_TEMPLATE in TEMPLATE_MODES`, `PRISM_MCP_AUTO_STOP_SEC >= 0`, `PRISM_VRAM_RESERVE_MB > 0`, `PRISM_RAM_RESERVE_MB > 0`).
+  - Module-level `load_config() -> EnvConfig`: reads `PRISM_ENV_FILE` if set, parses it, layers the values under `os.environ`, then runs `from_env(...)`. Emits one `logging.warning("PRISM_FOO is set but is not a declared env var; ignoring")` per unknown `PRISM_*` key in the merged env.
+  - Stdlib-only; no new imports beyond `dataclasses`, `os`, `pathlib`, `logging`, `typing`, `re`.
+
+- [x] 11.2 `tests/test_env_config.py` (new file, hermetic):
+  - `test_defaults_match_existing_getter_behaviour` — constructs `EnvConfig.from_env({})` and asserts every field equals the default value the current `os.environ.get` would return for that key.
+  - `test_from_env_coerces_typed_fields` — `from_env({"PRISM_DEVICE": "cuda"})` → `EnvConfig(device="cuda")`; `from_env({"PRISM_PREFILL_CHUNK": "1024"})` → `prefill_chunk=1024`; `from_env({"PRISM_MAX_QUEUE": "16"})` → `max_queue=16`; `from_env({"PRISM_LOAD_LOCK": "off"})` → `load_lock=False`; same for `0`, `false`, `no` (matching today's strict set).
+  - `test_invalid_value_raises_value_error_naming_the_field` — `from_env({"PRISM_DEVICE": "ROGUE"})` raises `ValueError` whose message names `PRISM_DEVICE` and lists the allowed enum; same for `PRISM_PREFILL_CHUNK=abc`, `PRISM_MCP_AUTO_STOP_SEC=-1.0`, `PRISM_VRAM_RESERVE_MB=0`.
+  - `test_quoted_value_in_env_file_preserves_spaces` — write a temp `.env` with `PRISM_DEFAULT_URL="http://localhost:5272/v1 key"` (whitespace inside quotes) and `PRISM_DEVICE='cuda'` (single-quoted); both parse correctly; `# comment` and blank lines are skipped.
+  - `test_unknown_prism_var_warns_at_startup` — `load_config()` with `os.environ` patched to include `PRISM_FOO=bar` emits exactly one `logging.warning` whose message contains `PRISM_FOO` and does NOT raise (silent-typo guard).
+  - `test_process_env_overrides_env_file` — both `PRISM_ENV_FILE` and the process env set `PRISM_DEVICE`; the process env wins.
+  - `test_no_prism_env_file_means_no_file_read` — `load_config()` with no `PRISM_ENV_FILE` does not touch the filesystem (verified via `mock.patch("os.path.exists")`).
+
+- [x] 11.3 `prism/cli.py` migrate (1 callsite — `api_key` only; the plan overestimated 5; `os.environ["PRISM_DEVICE"] = ...` line was a write, not a read):
+  - `prism.cli.get_config()` returns a fresh `EnvConfig` per call (no module-load cache — tests patch `os.environ` between `run_cli()` invocations and would otherwise see a stale snapshot).
+  - `cmd_serve` reads `_config.api_key` instead of `os.environ.get("PRISM_API_KEY")`. CLI flag `--api-key` keeps precedence (`args.api_key or get_config().api_key`).
+  - The remaining 4 modules (server, resources, templates, mcp) keep their existing `os.environ.get` reads; future Phase migrates them one at a time.
+  - Stdlib-only; no behaviour change for users whose env is well-formed.
+
+- [x] 11.4 `docs/getting-started.md` + `CHANGELOG.md`:
+  - `docs/getting-started.md` Configuration section gains a "Loading settings from a file" subsection that documents `PRISM_ENV_FILE=/path/to/.env` opt-in, the `KEY=VALUE` format with `# comment` and quoted whitespace, and the precedence rules (process env > file; CLI flags > env; unknown `PRISM_*` warns).
+  - `CHANGELOG.md [Unreleased]`: `### Added` — the `prism/env_config.py` module with `EnvConfig.from_env()` / `from_env_file()` and the `PRISM_ENV_FILE=/path/to/.env` opt-in (stdlib-only, no runtime dep). `### Changed` — `prism/cli.py` reads `PRISM_API_KEY` through `EnvConfig.from_env()` (defaults unchanged for users; typos are caught at startup instead of at first use).
+  - Tests: `python3 scripts/sdlc_check.py --only docs`.
+
+> **Commit note.** Same as Phases 4–10: runtime + tests + docs + changelog land in one commit. The red step is `python3 scripts/sdlc_check.py --red tests.test_env_config.EnvConfigTests.test_unknown_prism_var_warns_at_startup`; the failing reason must be that `load_config()` silently ignores `PRISM_FOO` in `os.environ` (the test sets the env, calls `load_config()`, and asserts exactly one `logging.warning` whose message contains `PRISM_FOO` — fails today because no warning fires).
+
+---
+
 ## Phase 9: Graceful shutdown during in-flight SSE responses
 
 Spec: `spec.md` section 4 (P13). Status: implemented, reviewed (gate green: 426 tests; review found 3 MINOR + 6 NIT findings, all fixed test-first: catch tuples simplified to `(OSError, ValueError)` and updated in `spec.md`; test 2 split into a thin integration test (catch-tuple widening) plus a unit test (`test_sse_raises_connection_reset_when_safe_write_returns_none`) that locks in the `_sse` re-raise contract without driving a real streaming request — the prior one-shot patch leaked `FakeEngine.produced` into `TestStopSequences`; `_sse_error` except narrowed; `_dispatch` asymmetry documented with a comment; `/health` follow-up added to test 3; stale docstring in `_sse_error` updated to the new tuple). Verifying the fixes with the tests above; not re-running an independent reviewer in this session. Items 9.1 and 9.2 land as one commit, matching Phases 4–8. The gap is that Ctrl+C or a default-handler SIGTERM during an in-flight streamed response produces an unhandled I/O exception inside the handler thread (`OpenAIApiHandler._begin_sse`, `_sse_error`, or the streaming loops after `with server:` has closed the connection underneath them). The daemon thread does not kill the process, but the traceback surfaces to the operator's terminal at the same time as `Shutting down server...`, making a clean shutdown look like a crash. Today only `(BrokenPipeError, ConnectionResetError)` is caught; `OSError` ("Bad file descriptor") or `ValueError` ("I/O operation on closed file.") from a write after the connection file is closed propagates. `POST /v1/drain` (P12) covers its own path and is unaffected. No invariant changes (I1–I8 still hold); stdlib-only.
@@ -155,3 +226,71 @@ Spec: `spec.md` section 4 (P13). Status: implemented, reviewed (gate green: 426 
 - [x] 9.2 `docs/api.md`: in the Concurrency paragraph (next to the existing text on queue cancellation), add one sentence: "Ctrl+C / SIGTERM during an in-flight streamed response finishes the current generation under the engine lock and exits `0`; no client-side connection error surfaces as an unhandled traceback." `CHANGELOG.md` `[Unreleased]` gets a `### Fixed` entry with one bullet naming the shutdown race and that `_begin_sse`, `_sse_error`, the streaming loops, and `_send_json` swallow shutdown-time I/O errors at debug. Tests: `tests/test_docs.py --only docs`.
 
 > **Commit note.** Same as Phases 4–8: runtime + tests + docs + changelog land in one commit. The red step is `python3 scripts/sdlc_check.py --red tests.test_prism_server_api.TestShutdownRace.test_begin_sse_after_client_close_does_not_raise`; the failing reason must be that `_begin_sse` raises `ConnectionResetError`/`OSError` on the closed socket and the test sees an unhandled exception.
+
+---
+
+## Phase 12: ACP agent, first milestone (handshake + a plain streamed prompt turn)
+
+Spec: `spec.md` section 4 (P16). Status: Phase 12 complete and reviewed. Independent review (fresh subagent, scoped to this phase's diff) found 5 findings:
+(1) critical — malformed-but-JSON-valid input (wrong-typed `params`/`prompt`) crashed the whole `prism acp` process via an
+unhandled exception in the main stdin loop, killing every open session; (2) high — `session/cancel` is session-scoped
+with no per-turn correlation id, so a stale cancel can in a narrow race affect the wrong (later) prompt on the same
+session; (3) high — a failed generation left a dangling, unanswered user turn in `session.messages`, corrupting the next
+prompt's role alternation; (4) medium — the hardcoded model-id fallback for an empty catalog was undocumented and
+duplicated as a literal in both `mcp.py` and `acp.py`; (5) low — `initialize`'s `protocolVersion` accepted booleans
+(round-tripping as JSON `true`/`false`) and negative numbers unvalidated. (1), (3), (5) fixed test-first (9 new tests in
+`tests/test_prism_acp.py`, all proven red before the fix); (4) fixed by adding `prism.catalog.DEFAULT_FALLBACK_MODEL_ID`
+as the single source of truth and documenting it in `docs/cli.md` / `docs/integrations.md`; (2) accepted as a documented
+limitation per operator decision (spec.md P16 "Known limitation" bullet under `session/cancel`) rather than a code fix,
+since ACP's `session/cancel` carries no turn-correlation id and a real fix would need a protocol extension Prism does not
+control — only reachable if the client itself sends a new `session/prompt` before receiving the previous one's
+`stopReason`. Gate green after fixes (474 tests); fixes verified by tests, not re-reviewed by a second fresh subagent.
+Phase 13 (fs-mediated tool calls) and Phase 14 (terminal execution) remain in the Phase 3 backlog, gated by `intent.md`
+non-goal §4.5, to be promoted one at a time. Awaiting operator decision to commit. `intent.md` §2
+(outcome), §3.7 (constraint) and §4.5 (non-goal) approved 2026-09-23. This phase is deliberately narrow: a working `prism acp` an ACP-capable editor (Zed) can hold a plain-text
+streamed conversation with, and cancel — no file or command access yet (that is Phase 13/14, listed under Phase 3
+backlog, gated by non-goal §4.5). No invariant changes; stdlib-only (hand-rolled JSON-RPC over stdio, one
+`threading.Lock` for stdout, one daemon thread per in-flight `session/prompt`, matching `prism/mcp.py`'s existing pattern
+of a synchronous stdio loop plus daemon timers).
+
+- [x] 12.1 `prism/catalog.py`: extract `pick_default_model(all_models) -> Optional[str]` from the model-picking logic
+  duplicated today only inside `mcp.py::call_prism_server` (prefer a CUDA ONNX model, else the first available model).
+  `mcp.py` calls the extracted helper instead of its inline logic (no behavior change). Test: `tests/test_prism_catalog.py`
+  (new `TestPickDefaultModel`: empty list → `None`; a CUDA and a non-CUDA model present → the CUDA one; no CUDA model →
+  the first one) plus the existing `tests/test_prism_mcp.py` fallback tests continuing to pass unchanged (regression
+  guard that the extraction did not change `call_prism_server`'s behavior).
+- [x] 12.2 `prism/acp.py` (new file): `run_acp_server()` stdio loop; `_Session` dataclass; `handle_initialize`,
+  `handle_session_new`, `handle_session_prompt` (spawns the worker thread), `handle_session_cancel`; `_stdout_lock`;
+  the SSE-parsing helper for the `$PRISM_BASE_URL` path and the `stream_generate` fallback path, both checking
+  `cancel_event` between chunks. Tests in `tests/test_prism_acp.py` (new, hermetic, mirrors `tests/test_prism_mcp.py`'s
+  structure): `test_initialize_returns_capabilities`; `test_session_new_returns_session_id_and_resolves_model`;
+  `test_session_prompt_streams_agent_message_chunks_then_end_turn` (patch the SSE source with a fake iterable of chunks,
+  assert the emitted `session/update` notifications and the final `stopReason: "end_turn"` response, using a
+  `list`-backed fake stdout writer instead of real stdio); `test_session_prompt_rejects_non_text_content_block`;
+  `test_session_prompt_rejects_concurrent_prompt_on_same_session`; `test_session_cancel_stops_in_flight_prompt_and_reports_cancelled`
+  (drives `handle_session_prompt` on a background thread against a fake slow chunk source, calls `handle_session_cancel`
+  mid-stream, asserts the response is `stopReason: "cancelled"` and no chunks are emitted after the cancel);
+  `test_session_cancel_after_natural_completion_is_a_noop` (race guard: cancel arrives after `"end_turn"` already sent);
+  `test_unknown_method_with_id_returns_method_not_found`; `test_unknown_method_without_id_is_dropped`;
+  `test_generation_error_resolves_prompt_with_json_rpc_error` (patch the SSE path to raise / return a 503, assert
+  `error.code == -32000` and the message names the underlying Prism error).
+- [x] 12.3 `prism/cli.py`: `cmd_acp(args)` calling `prism.acp.run_acp_server()`, wired as `subparsers.add_parser("acp", ...)`
+  next to `p_mcp`. Test: `tests/test_prism_cli.py::TestAcpCommand` (there was no pre-existing `prism mcp --help` test to
+  mirror, as the original wording assumed; instead patches `prism.acp.run_acp_server` and asserts `cmd_acp` calls it and
+  exits 0 — the same technique `TestServeArgs` uses for `start_server`).
+- [x] 12.4 `prism/connectors.py` + `prism/cli.py`: `prism connect acp [--write] [--test]` prints (and optionally merges
+  into) `~/.config/zed/settings.json`'s `agent_servers.Prism` entry for `prism acp`, via a new `_merge_zed_agent_entry`
+  helper mirroring `merge_prism_mcp_entry` (validate-then-backup order, safer than the inline antigravity/cursor/claude
+  branches in `connect_mcp`). `test_acp_protocol()` runs a live `initialize` + `session/new` handshake against a real
+  `prism acp` subprocess, mirroring `test_mcp_protocol()`. Test: `tests/test_prism_connectors.py::TestAcpConnector`
+  (write creates the entry; write preserves other top-level keys and other `agent_servers` and backs up first;
+  printed-only leaves no file; live handshake test).
+- [x] 12.5 Docs and changelog: `docs/integrations.md` "ACP (Zed)" section; `docs/cli.md` entries for `prism acp` and
+  `prism connect acp`; `docs/getting-started.md` Environment row for `$PRISM_ACP_MODEL`; `CHANGELOG.md [Unreleased]`
+  `### Added`. Tests: `tests/test_docs.py` (`--only docs`).
+
+> **Commit note.** Same shape as Phases 4–11: runtime + tests + docs + changelog land in one commit (12.1 may land
+> separately first since it is a pure, behavior-preserving extraction with its own regression test — the operator can
+> decide at commit time). The red step is
+> `python3 scripts/sdlc_check.py --red tests.test_prism_acp.TestAcp.test_session_prompt_streams_agent_message_chunks_then_end_turn`;
+> the failing reason must be `ModuleNotFoundError: No module named 'prism.acp'`.

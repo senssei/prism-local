@@ -58,6 +58,71 @@ def test_prism_server_connection(base_url: str = "http://localhost:5272/v1") -> 
         return False
 
 
+def _merge_zed_agent_entry(cfg_path: Path, prism_entry: Dict[str, Any]) -> None:
+    """
+    Sets `agent_servers.Prism` in a Zed `settings.json`, keeping every other key. An existing file is
+    copied to `<name>.bak` first. Raises ValueError (and writes nothing) if the existing file is not
+    valid JSON, mirroring `merge_prism_mcp_entry`.
+    """
+    data: Dict[str, Any] = {}
+    if cfg_path.exists():
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"{cfg_path} does not contain a JSON object")
+        shutil.copy2(cfg_path, cfg_path.with_name(cfg_path.name + ".bak"))
+    servers = data.setdefault("agent_servers", {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"'agent_servers' in {cfg_path} is not an object")
+    servers["Prism"] = prism_entry
+    cfg_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def test_acp_protocol(bin_path: Optional[str] = None) -> Dict[str, Any]:
+    """Runs a live JSON-RPC 2.0 handshake (`initialize` + `session/new`) against `prism acp`."""
+    prism_bin = bin_path or _get_prism_bin_path()
+    init_payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": 1, "clientCapabilities": {}},
+    }) + "\n"
+
+    new_payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "session/new",
+        "params": {"cwd": "/tmp", "mcpServers": []},
+    }) + "\n"
+
+    proc = subprocess.Popen(
+        [prism_bin, "acp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        stdout_data, _ = proc.communicate(input=init_payload + new_payload, timeout=5)
+        lines = [line.strip() for line in stdout_data.strip().split("\n") if line.strip()]
+        responses = [json.loads(line) for line in lines]
+
+        init_res = next((r for r in responses if r.get("id") == 1), {})
+        new_res = next((r for r in responses if r.get("id") == 2), {})
+        session_id = new_res.get("result", {}).get("sessionId")
+
+        return {
+            "success": bool(init_res.get("result") and session_id),
+            "protocol_version": init_res.get("result", {}).get("protocolVersion"),
+            "session_id": session_id,
+        }
+    except Exception as ex:
+        return {"success": False, "error": str(ex)}
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
 def test_mcp_protocol(bin_path: Optional[str] = None) -> Dict[str, Any]:
     """Runs a live JSON-RPC 2.0 handshake against prism mcp."""
     prism_bin = bin_path or _get_prism_bin_path()
@@ -361,5 +426,48 @@ def connect_mcp(
             print(f"   • Available Tools ({res.get('tools_count')}): {', '.join(res.get('tools', []))}")
         else:
             print(f"   ❌ MCP Handshake Failed: {res.get('error')}")
+
+
+# ============================================================================
+# ACP (Zed) Connector
+# ============================================================================
+
+def connect_acp(write: bool = False, test: bool = False) -> None:
+    prism_bin = _get_prism_bin_path()
+    base_url = "http://localhost:5272/v1"
+
+    print("\n" + "=" * 68)
+    print(" 🔌 PRISM CONNECTOR: AGENT CLIENT PROTOCOL (ACP) — ZED")
+    print("=" * 68)
+
+    prism_agent_config = {
+        "command": prism_bin,
+        "args": ["acp"],
+        "env": {"PRISM_BASE_URL": base_url},
+    }
+
+    cfg_path = Path.home() / ".config" / "zed" / "settings.json"
+    print(f"\n📋 Target: ZED")
+    print(f"   Config Path: {cfg_path}")
+    if write:
+        try:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            _merge_zed_agent_entry(cfg_path, prism_agent_config)
+            print(f"   ✅ Wrote Zed agent_servers config to: {cfg_path}")
+        except Exception as ex:
+            print(f"   ❌ Failed to write Zed config: {ex}")
+    else:
+        snippet = {"agent_servers": {"Prism": prism_agent_config}}
+        print(json.dumps(snippet, indent=2))
+
+    if test:
+        print("\n🧪 Testing ACP Protocol & Handshake:")
+        res = test_acp_protocol(prism_bin)
+        if res.get("success"):
+            print("   ✅ Handshake Successful!")
+            print(f"   • Protocol Version: {res.get('protocol_version')}")
+            print(f"   • Session ID:       {res.get('session_id')}")
+        else:
+            print(f"   ❌ ACP Handshake Failed: {res.get('error')}")
 
     print("\n" + "=" * 68 + "\n")

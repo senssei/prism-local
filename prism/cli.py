@@ -12,6 +12,7 @@ from prism import PRISM_BANNER
 from prism.catalog import AmbiguousModelError, ModelCatalog, planned_device
 from prism.chat import run_interactive_chat
 from prism.benchmark import run_benchmark
+from prism.env_config import EnvConfig, load_config
 from prism.server import default_max_queue, default_queue_timeout, start_server
 from prism.telemetry import get_gpu_info, bootstrap_cuda_env, probe_cuda_provider
 from prism.engine import ModelLoadError, OnnxGenAiEngine, OG_AVAILABLE
@@ -19,7 +20,7 @@ from prism.resources import inspect_wslconfig, system_memory_info
 from prism.templates import render_prompt
 from prism.ollama_bridge import is_ollama_running, stream_ollama_chat
 from prism.convert import missing_dependencies, convert_model
-from prism.connectors import connect_cursor, connect_cline, connect_mcp
+from prism.connectors import connect_cursor, connect_cline, connect_mcp, connect_acp
 
 
 def cmd_status(args):
@@ -190,6 +191,13 @@ def cmd_chat(args):
     run_interactive_chat(args.model)
 
 
+# Phase 11 / 11.3: read env fresh per CLI invocation. Tests patch `os.environ`
+# between calls; a snapshot would lock the empty env forever. `load_config()` is
+# cheap (mostly stdlib reads), so the per-call cost is negligible.
+def get_config() -> "EnvConfig":
+    return load_config()
+
+
 def cmd_serve(args):
     max_queue = args.max_queue if args.max_queue is not None else default_max_queue()
     if max_queue == 0:
@@ -197,7 +205,7 @@ def cmd_serve(args):
     start_server(
         port=args.port,
         host=args.host,
-        api_key=args.api_key or os.environ.get("PRISM_API_KEY") or None,
+        api_key=args.api_key or get_config().api_key,
         cors_origins=args.cors_origin,
         queue_timeout=args.queue_timeout if args.queue_timeout is not None else default_queue_timeout(),
         max_queue=max_queue,
@@ -211,6 +219,11 @@ def cmd_benchmark(args):
 def cmd_mcp(args):
     from prism.mcp import run_mcp_server
     run_mcp_server()
+
+
+def cmd_acp(args):
+    from prism.acp import run_acp_server
+    run_acp_server()
 
 
 def cmd_connect(args):
@@ -234,8 +247,14 @@ def cmd_connect(args):
             write=args.write,
             test=args.test,
         )
+    elif target == "acp":
+        connect_acp(
+            write=args.write,
+            test=args.test,
+        )
     else:
-        print("Specify a connector target: 'prism connect cursor', 'prism connect cline', or 'prism connect mcp'.")
+        print("Specify a connector target: 'prism connect cursor', 'prism connect cline', 'prism connect mcp', or "
+              "'prism connect acp'.")
 
 
 def _device_parent() -> argparse.ArgumentParser:
@@ -324,6 +343,10 @@ def main():
     p_mcp = subparsers.add_parser("mcp", help="Run Prism as a stdio Model Context Protocol (MCP) server")
     p_mcp.set_defaults(func=cmd_mcp)
 
+    # acp
+    p_acp = subparsers.add_parser("acp", help="Run Prism as a stdio Agent Client Protocol (ACP) agent")
+    p_acp.set_defaults(func=cmd_acp)
+
     # connect
     p_conn = subparsers.add_parser("connect", help="Configure IDEs, extensions, and MCP clients")
     conn_sub = p_conn.add_subparsers(dest="connect_target", help="Connector target")
@@ -349,6 +372,12 @@ def main():
     p_conn_mcp.add_argument("--write", action="store_true", help="Write or update the target MCP configuration file")
     p_conn_mcp.add_argument("--test", action="store_true", help="Run JSON-RPC protocol handshake test")
     p_conn_mcp.set_defaults(func=cmd_connect)
+
+    # connect acp
+    p_conn_acp = conn_sub.add_parser("acp", help="Configure Zed's ACP agent_servers settings")
+    p_conn_acp.add_argument("--write", action="store_true", help="Write or update ~/.config/zed/settings.json")
+    p_conn_acp.add_argument("--test", action="store_true", help="Run JSON-RPC protocol handshake test")
+    p_conn_acp.set_defaults(func=cmd_connect)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):

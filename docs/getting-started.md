@@ -60,7 +60,8 @@ actually loads**, and whether Ollama is reachable. Fix anything marked ❌ befor
 | `PRISM_TEMPLATE` | `auto`, `jinja` or `builtin`: whether to render a model's own Jinja chat template (needs the `jinja` extra); see [Models](models.md#rendering-the-template-itself-optional) | `auto` |
 | `PRISM_API_KEY` | Bearer token for `prism serve`; also sent by the MCP client and connector probe | unset (no auth) |
 | `OLLAMA_HOST` | Ollama daemon address (`host`, `host:port` or a URL), as in Ollama itself | `http://localhost:11434` |
-| `PRISM_BASE_URL` | Server URL used by `prism mcp` | `http://localhost:5272/v1` |
+| `PRISM_BASE_URL` | Server URL used by `prism mcp` and `prism acp` | `http://localhost:5272/v1` |
+| `PRISM_ACP_MODEL` | Model id `prism acp` uses for new sessions, overriding the CUDA-first auto-pick | unset (auto-pick) |
 | `PRISM_MCP_AUTO_STOP_SEC` | `prism mcp` exits with status 0 after this many seconds without a `tools/call` (a positive float; the timer resets on every call); intended for test harnesses that start the MCP process but never drive it. `0` or unset = no auto-stop. | `0` |
 | `PRISM_QUEUE_TIMEOUT` | Seconds a request may wait for the model before `503` (`0` = forever); same as `prism serve --queue-timeout` | `300` |
 | `PRISM_MAX_QUEUE` | Maximum requests allowed to wait for the engine before immediate `503 server_busy` (`0` = unlimited); same as `prism serve --max-queue` | `8` |
@@ -78,6 +79,29 @@ Models are searched in `$PRISM_MODEL_DIRS`, then `~/.prism/models`, then the Fou
 !!! note "Upgrading from a pre-release checkout"
     Earlier snapshots also scanned `./models` and a sibling `../02-ollama-loadtest` checkout, and `bin/prism` used that
     checkout's virtualenv. Set `PRISM_MODEL_DIRS` and `PRISM_PYTHON` to keep using them.
+
+### Loading settings from a file
+
+Prism does not auto-discover `.env` in the current working directory (security: never load a file the operator did not name).
+To load one, set `PRISM_ENV_FILE=/path/to/prism.env` in the process env, then start Prism. The file format is the
+traditional `KEY=VALUE` pair, one per line, with `#` comments and blank lines tolerated, and double- or single-quoted
+values preserve internal whitespace:
+
+```bash
+export PRISM_ENV_FILE=/path/to/prism.env    # opt-in; no env file is read without this
+cat >/path/to/prism.env <<'EOF'
+# Prism config for the local dev box
+PRISM_DEVICE=cuda
+PRISM_BASE_URL="http://localhost:5272/v1 key"   # quotes preserve the space inside
+PRISM_PREFILL_CHUNK=2048
+PRISM_LOAD_LOCK=off
+EOF
+prism serve                                      # values from prism.env are now visible
+```
+
+The process env (and any flag that overrides it) takes precedence over the file. Unknown `PRISM_*` keys in either source
+emit one `logging.warning` at startup so a typo is caught instead of silently ignored. Bad values (e.g. `PRISM_DEVICE=ROGUE`)
+fail fast with a single `ValueError` listing every problem, not a deferred `TypeError` at first use.
 
 ## First run
 

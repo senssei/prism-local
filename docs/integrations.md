@@ -57,3 +57,32 @@ prism connect mcp --target cursor --write       # .cursor/mcp.json
 Without `--write`, the snippet is only printed. With `--write`, an existing config is merged (your other servers are kept) and
 a `.bak` copy is saved first; a file that is not valid JSON is left untouched. The generated entries assume the server is on
 the default port `5272`.
+
+## ACP (Zed)
+
+`prism acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) over stdio, so an ACP-capable editor (Zed and
+others) can run a coding session against a local, zero-cost model. First milestone (spec.md P16): plain-text prompts and
+streamed responses only — no file or terminal access yet (see `intent.md` non-goal §4.5 and `plan.md` Phase 3 backlog for the
+follow-up phases).
+
+| Method | Direction | Purpose |
+|---|---|---|
+| `initialize` | client → agent | Protocol version and capability negotiation. No auth required (loopback, single-user). |
+| `session/new` | client → agent | Starts a session; resolves the model once (`$PRISM_ACP_MODEL`, else a CUDA ONNX model if one is installed, else the first available model, else the hardcoded `Phi-4-mini-instruct-cuda-gpu` if no local models are installed) and returns a `sessionId`. |
+| `session/prompt` | client → agent | A turn of one or more `{"type": "text", "text": ...}` content blocks. Streams `session/update` notifications (`agent_message_chunk`, `agent_thought_chunk` for `<think>` content) and resolves with `stopReason: "end_turn"` or `"cancelled"`. Only one prompt may be in flight per session. |
+| `session/cancel` | client → agent (notification) | Stops the in-flight prompt for a session; the pending `session/prompt` resolves with `stopReason: "cancelled"`. |
+
+Generation talks to `$PRISM_BASE_URL` (default `http://localhost:5272/v1`, with `$PRISM_API_KEY` if set) the same way
+`prism mcp` does; if the server is unreachable, it falls back to loading the ONNX model directly in-process.
+
+`session/cancel` is scoped to the session, not to a specific turn — a well-behaved client that waits for each prompt's
+result before sending the next is unaffected, but a cancel sent for a turn that has already resolved can, in a race, stop
+the *next* turn instead (spec.md P16 documents this as a known limitation).
+
+```bash
+prism connect acp --test              # run a protocol handshake against `prism acp`
+prism connect acp --write             # merge an agent_servers entry into ~/.config/zed/settings.json
+```
+
+Without `--write`, the snippet is only printed. With `--write`, an existing `settings.json` is merged (your other settings
+and agent servers are kept) and a `.bak` copy is saved first; a file that is not valid JSON is left untouched.

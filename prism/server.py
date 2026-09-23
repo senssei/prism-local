@@ -333,8 +333,24 @@ def _stop_param(req: Dict[str, Any]) -> List[str]:
 
 
 def _tools_param(req: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-    """`tools` as OpenAI sends them (`[{"type": "function", "function": {"name", ...}}]`), or None when absent or when `tool_choice` is "none".
-    Other `tool_choice` values are treated as "auto": Prism cannot force a call."""
+    """`tools` as OpenAI sends them (`[{"type": "function", "function": {"name", ...}}]`), or `None` when absent.
+
+    `tool_choice` shapes (Phase 10 / P14):
+        - `"none"` → tools dropped (`None`).
+        - `"auto"` (or absent) → all tools returned; the model picks.
+        - `"required"` → all tools returned; the model is told tools exist. Open-source
+          models do not enforce "required" themselves; Prism keeps the tools in scope
+          (no engine changes), and the model decides.
+        - `{"type": "function", "function": {"name": "<X>"}}` → the list is narrowed to
+          the tool(s) whose `function.name` matches `<X>` — multiple matches keep all
+          copies (callers are expected to send unique names; the validation in
+          `_tools_param` earlier in this function rejects empty names). Any other tool
+          definition the caller sent is hidden from the model. If `<X>` is not in the
+          supplied `tools` list, `400 invalid_request_error` is raised and the engine
+          is never touched.
+    Any other shape (other than the four above) is a `400 invalid_request_error` whose
+    message names the four accepted shapes, so callers find the right incantation in
+    the failure text."""
     tools = req.get("tools")
     if tools is None or tools == []:
         return None
@@ -343,7 +359,25 @@ def _tools_param(req: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         and isinstance(t["function"].get("name"), str) and t["function"]["name"] for t in tools)
     if not ok:
         raise ApiError(400, "'tools' must be a list of {\"type\": \"function\", \"function\": {\"name\": ...}} objects")
-    return None if req.get("tool_choice") == "none" else tools
+    tool_choice = req.get("tool_choice")
+    if tool_choice is None or tool_choice == "auto" or tool_choice == "required":
+        return list(tools)
+    if tool_choice == "none":
+        return None
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function" \
+            and isinstance(tool_choice.get("function"), dict):
+        name = tool_choice["function"].get("name")
+        if not isinstance(name, str) or not name:
+            raise ApiError(400, "`tool_choice.function.name` must be a non-empty string naming one of the supplied tools")
+        chosen = [t for t in tools if t["function"]["name"] == name]
+        if not chosen:
+            raise ApiError(400, f"`tool_choice` named tool '{name}' but the request's `tools` list does not contain it "
+                                   f"(available: {sorted(t['function']['name'] for t in tools)})")
+        return chosen
+    # Any other shape — scalar, list, dict with another type, etc. — is a hard 400.
+    raise ApiError(400, "`tool_choice` must be one of: \"none\", \"auto\", \"required\", "
+                       "or {\"type\": \"function\", \"function\": {\"name\": ...}}. "
+                       f"Got {type(tool_choice).__name__}.")
 
 
 def _ollama_error_detail(err: "urllib.error.HTTPError") -> str:

@@ -243,11 +243,21 @@ def render_prompt(resolved: Dict[str, Any], messages: List[Dict[str, Any]], tool
 
 def supports_tools(resolved: Dict[str, Any]) -> bool:
     """Whether Prism can put tool definitions into this model's prompts: it renders the model's own Jinja template (the `jinja` extra),
-    and that template uses `tools`."""
+    and that template uses `tools`. The check is structural on the template source — `tools` must appear inside a Jinja
+    expression (`{{ ... tools ... }}`) or inside a Jinja block (`{% ... tools ... %}`, including `{% if tools ... %}` and
+    `{% for t in tools ... %}`). Prose mentions in `{# ... #}` Jinja comments or in non-Jinja text do not count, so a template
+    that documents `tools` without rendering them no longer falsely reports support (Phase 10 / P14)."""
     if template_mode() == "builtin" or not jinja_available():
         return False
     text = read_chat_template(resolved.get("path") or "")
-    return bool(text) and re.search(r"\btools\b", text) is not None
+    # Structural Jinja usage: `tools` must appear inside a Jinja expression or block, with a word boundary so
+    # `tool_registry`, `tools_dict`, etc. don't match. Comment blocks (`{# ... #}`) are excluded because their
+    # delimiters are `{#` and `#}`, not `{%` / `%}`.
+    return bool(text) and re.search(
+        r"\{\{[^}]*\btools\b[^}]*\}\}"
+        r"|\{\%[^%]*\btools\b[^%]*%\}",
+        text,
+    ) is not None
 
 
 def flatten_content(content: Any) -> str:

@@ -192,6 +192,204 @@ Tests and reviews cite these by number. Changing one needs operator approval.
   - Docs: `docs/api.md` Concurrency paragraph gains one sentence naming the shutdown behaviour and the `0` exit
     code. `CHANGELOG.md` `[Unreleased]` gets a `### Fixed` entry.
 
+### Phase 10: Honor `tool_choice` on the agent path (`plan.md` Phase 10)
+
+- **P14 `tool_choice` is honored; `supports_tools` is a structural check**:
+  - Today, `OpenAIApiHandler._tools_param` only special-cases `tool_choice == "none"`
+    (`prism/server.py`); every other value, including `"required"`, the structured
+    `{"type": "function", "function": {"name": ...}}`, and the OpenAI default
+    `"auto"`, is silently treated as `"auto"` — the full tools list goes to the
+    engine even when the caller explicitly named one tool. That makes
+    `tool_choice: {"type": "function", "function": {"name": "get_weather"}}` a
+    silent fallback on every model that would have picked a different tool, exactly
+    the failure mode `intent.md §3.3` calls "a silent fallback is a bug" on the
+    agent path.
+  - Behaviors:
+    - `tool_choice == "none"` → tools list returns `None` (unchanged).
+    - `tool_choice == "required"` → tools list returned in full; the engine's own
+      tool-aware template is the only way to "force" a call on the open-source
+      models Prism targets, and that is what today's rendering already does. The
+      docstring makes this contract explicit instead of hiding the auto-fallback
+      behind a verbose internal name.
+    - `tool_choice == "auto"` (or absent) → tools returned in full (unchanged).
+    - `tool_choice == {"type": "function", "function": {"name": "X"}}` →
+      `_tools_param` narrows the list to the tool whose name matches `X`. The
+      model only sees that one tool definition, which is what OpenAI promises.
+    - Any other shape → `400 invalid_request_error` with a message naming the
+      expected shapes (`"none" | "auto" | "required" | {"type": "function", ...}`).
+  - `supports_tools` is no longer a `re.search(r"\btools\b", text)` text scan
+    (`prism/templates.py`). It is replaced with a structural check that only
+    matches the `tools` symbol when it appears inside a Jinja expression or block:
+    `\{\{[^}]*\btools\b[^}]*\}\}|\{\%[^%]*\btools\b[^%]*%\}`. The first branch is
+    the `{{ … tools … }}` expression form; the second covers every Jinja
+    block that uses `tools` (`{% if tools %}`, `{% for t in tools %}`,
+    `{% for tools in x %}`, `{% set t = tools %}`, `{% if not tools %}` — the
+    only requirement is that the block contains the symbol). A `\btools\b` word
+    boundary excludes `tool_registry`, `tools_dict`, etc. Jinja comment blocks
+    (`{# … #}`) are excluded because their delimiters are `{# … #}`, not
+    `{% … %}`. Templates whose chat_template file is missing the keyword in any
+    Jinja block return `False`, so the existing `400 tools_not_supported` path
+    is reached on the same models as today — and True results now correspond to
+    genuine template support, not prose.
+  - No invariant changes (I1–I8 still hold; I1 strengthens: the new heuristic is
+    a structural match, not a textual one, so a model whose template documents
+    "tools" without rendering them does not falsely claim support).
+  - Stdlib-only. No new env var, no new CLI flag, no new endpoint.
+  - No engine changes; the contract is honoured in the HTTP layer.
+  - Docs: `docs/api.md` "Tool calling" gains a paragraph listing exactly which
+    `tool_choice` values Prism honours and which it 400s. `CHANGELOG.md`
+    `[Unreleased]` gets a `### Changed` entry.
+
+### Phase 11: Central env-var schema, stdlib-only (`plan.md` Phase 11)
+
+- **P15 Centralised, validated, type-safe env config (no runtime deps)**:
+  - Today, 22 `PRISM_*` env vars are read with `os.environ.get("X", default)`
+    scattered across `prism/cli.py`, `prism/resources.py`, `prism/templates.py`,
+    `prism/mcp.py`, and `prism/server.py` (31 callsites in total). Defaults are
+    defined alongside the readers, type coercion is hand-rolled (`float(...)`,
+    `raw.strip().lower() not in ("off","0","false","no")`, `or "auto"`), and a
+    typo'd var (`PRISM_DEVIC=...`) is caught only at first use, silently.
+  - Add `prism/env_config.py` — stdlib only (`dataclasses`, `os`, `pathlib`,
+    `logging`, `typing`, `re`; `configparser` optional for the `.env` reader if a
+    fragment form is later chosen). Single frozen dataclass `EnvConfig` declaring
+    every `PRISM_*` field with the right type, default, and a `__post_init__`
+    validator (e.g. `PRISM_PREFILL_CHUNK >= 0`, `PRISM_DEVICE in
+    {"auto","cpu","cuda"}`, `PRISM_TEMPLATE` in `TEMPLATE_MODES`).
+  - `EnvConfig.from_env(environ: Optional[Mapping[str, str]] = None) -> EnvConfig`
+    builds an instance from `os.environ` (or the supplied mapping for tests).
+    `EnvConfig.from_env_file(path)` parses a hand-rolled `KEY=VALUE` reader
+    (whitespace, `# comment`, blank lines, optional double-quoted value) and
+    merges it under `environ` so the process env still overrides on conflicts.
+  - A module-level `load_config() -> EnvConfig` runs at CLI/server start. Fails
+    fast: a malformed value (e.g. `PRISM_PREFILL_CHUNK=abc`) raises one
+    `ValueError` listing every bad field, not a deferred `TypeError` at first use.
+  - `.env` file loading is opt-in only. No auto-discovery in CWD; the only way
+    to load one is `PRISM_ENV_FILE=/path/to/.env` in the process env (security:
+    never load a file the operator did not name — prevents a third-party `cd`
+    from silently swapping API keys).
+  - Unknown vars in the process env that begin with `PRISM_` but are NOT in the
+    dataclass are logged at WARN at startup (silent-typo guard, not an error;
+    keeps backward compatibility with `PRISM_*` vars a shell export may have
+    brought along).
+  - This phase migrates `prism/cli.py` only (the largest user, 5 callsites).
+    The other four modules keep their existing `os.environ.get` reads until a
+    follow-up phase migrates them one at a time.
+  - No invariant changes (I1–I8 still hold; I4 strengthens: the schema proves
+    "no runtime dependencies" by listing exactly what is read and how it's
+    coerced, with every reader in one file).
+  - Stdlib-only. No `kev`, no `pydantic-settings`, no `python-dotenv`.
+  - Docs: `docs/getting-started.md` Environment section gains a one-row-per-var
+    table (var, type, default, valid range) and a short "Loading from a file"
+    subsection that shows the `PRISM_ENV_FILE=/path/to/.env` opt-in flow with a
+    5-line `.env` example. `CHANGELOG.md [Unreleased]` `### Added` (the loader)
+    plus `### Changed` (the `prism/cli.py` migration).
+
+### Phase 12: ACP agent, first milestone — handshake and a plain streamed prompt turn (`plan.md` Phase 12)
+
+- **P16 `prism acp`**: a new stdio JSON-RPC 2.0 subcommand, `prism/acp.py`, structurally a sibling of `prism/mcp.py` (same
+  `for line in sys.stdin` shape) but speaking the [Agent Client Protocol](https://agentclientprotocol.com) instead of MCP.
+  This phase covers only a plain, tool-free chat session; file/terminal mediation is Phase 13/14 (not yet planned — see
+  "Not yet planned" below and `intent.md` §4.5).
+  - **Concurrency, the one real departure from `mcp.py`**: MCP's loop is fully synchronous — one request, one blocking
+    handler, one response. ACP cannot be: a `session/prompt` may stream for tens of seconds, and `session/cancel` must be
+    able to interrupt it while the main loop is still free to read other stdin lines. So `run_acp_server()`'s stdin loop
+    dispatches `session/prompt` onto its own daemon thread (one per in-flight prompt) and keeps reading; all other methods
+    (`initialize`, `session/new`, `session/cancel`) are handled inline on the main thread since they never block. A single
+    `threading.Lock` (`_stdout_lock`) guards every `sys.stdout.write` so a streamed `session/update` notification from the
+    worker thread can never interleave with another response mid-line.
+  - **`initialize`** (client→agent, request): params `{"protocolVersion": int, "clientCapabilities": {...}}`. Response:
+    `{"protocolVersion": <same or the highest Prism supports, whichever is lower>, "agentCapabilities": {"loadSession":
+    false, "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false}}, "authMethods": []}`.
+    `loadSession: false` and no auth methods are permanent for this milestone (intent.md non-goal §4.5: no session
+    persistence). No auth is required — same reasoning as the MCP server: loopback, single-user (I5). A `protocolVersion`
+    that is not a positive integer (a bool — `True`/`False` are `int` subclasses in Python and must not silently round-trip
+    as JSON `true`/`false` — a negative number, a float, or a string) is treated as absent: the response falls back to
+    `ACP_PROTOCOL_VERSION` rather than propagating the malformed value.
+  - **`session/new`** (client→agent, request): params `{"cwd": str, "mcpServers": [...]}`. `mcpServers` is accepted and
+    ignored (Prism does not host or proxy MCP servers inside its ACP agent — non-goal §4.5). Response: `{"sessionId": str}`
+    (a `uuid4` hex string). Session state (`_Session`: `sessionId`, `messages: List[dict]`, `model: str`,
+    `cancel_event: threading.Event`, `busy: bool`) lives in an in-process dict; it does not survive process restart.
+    `model` is resolved once, at `session/new` time, via a new shared helper `prism.catalog.pick_default_model(all_models)`
+    (extracted from the picking logic duplicated today only in `mcp.py::call_prism_server`: prefer a CUDA ONNX model, else
+    the first available model), overridable by `$PRISM_ACP_MODEL` (an unset or empty value keeps the auto-pick). If the
+    catalog is completely empty (no ONNX or Ollama models installed at all) and `$PRISM_ACP_MODEL` is unset,
+    `prism.catalog.DEFAULT_FALLBACK_MODEL_ID` (`"Phi-4-mini-instruct-cuda-gpu"`, the same literal `mcp.py::call_prism_server`
+    has always fallen back to) is used; `session/new` still succeeds in this case, and the absence of any real model only
+    surfaces on the first `session/prompt`, as a normal generation error (see below) — there is no separate "no models
+    installed" failure mode at `session/new` time.
+  - **`session/prompt`** (client→agent, request): params `{"sessionId": str, "prompt": [{"type": "text", "text": str}, ...]}`.
+    Any content block whose `"type"` is not `"text"` (e.g. `"image"`, `"resource"`, `"resource_link"` — all legal in the
+    protocol but not yet supported here) makes the whole request fail immediately with `-32602 invalid_params` naming the
+    unsupported type; nothing is sent to the model. A second `session/prompt` for a session whose previous prompt has not
+    yet resolved (`busy is True`) also fails immediately with `-32602 invalid_params` ("a prompt is already in progress for
+    this session"); the first milestone is one in-flight prompt per session.
+    - The text blocks are joined and appended to `messages` as a `{"role": "user", ...}` turn (same message-list shape as
+      `/v1/chat/completions`).
+    - Generation prefers `$PRISM_BASE_URL/chat/completions` with `"stream": true` (same default URL and `$PRISM_API_KEY`
+      auth as `mcp.py`); it parses the SSE stream (`data: {...}` lines, terminated by `data: [DONE]`) and, for every chunk
+      whose `choices[0].delta.content` is non-empty, sends a `session/update` **notification** (no `id`, so no response is
+      expected): `{"sessionId": ..., "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text",
+      "text": <piece>}}}`. `reasoning_content` deltas (P7) are forwarded the same way as `"agent_thought_chunk"` updates,
+      not `"agent_message_chunk"` — an ACP client that renders thoughts and answers differently gets that distinction for
+      free from Prism's existing reasoning-content separation.
+    - **Server unreachable** (`urllib.error.URLError`, matching `mcp.py`'s existing fallback condition): falls back to
+      `prism.engine.OnnxGenAiEngine.stream_generate` on the in-process `ActiveEngineManager` (same fallback the MCP server
+      already uses, same caveat that this bypasses the HTTP server's cross-request serialization — pre-existing behavior,
+      not new to ACP).
+    - **Cancellation**: `cancel_event` is checked between chunks in both the SSE-reading loop and the direct-engine
+      fallback loop. On seeing it set, the loop stops reading (closing the HTTP connection or the generator), and the
+      worker thread resolves the still-pending `session/prompt` request with `result: {"stopReason": "cancelled"}` instead
+      of `"end_turn"`. If generation had already finished naturally in the race, the `"end_turn"` response — sent first —
+      wins, and a `session/cancel` that arrives after is a silent no-op (idempotent; ACP does not require an
+      acknowledgement for `session/cancel`, it is a notification).
+    - **Errors** (backend unavailable, resource limits, template render failure, context length exceeded — the same
+      failure modes `docs/api.md` Errors table lists for `/v1/chat/completions`) resolve the `session/prompt` request with
+      a JSON-RPC error object, `code: -32000`, `message` naming the underlying Prism error (HTTP status code and body, or
+      the direct-engine exception text) — not a silently truncated answer. Matches the "no silent fallback" reasoning
+      behind I1 and P11. On any such error, the user turn appended at the start of this prompt is popped back off
+      `session.messages` before the error is sent, so the session's history has no unanswered, dangling user turn — the
+      next `session/prompt` on the same session starts from the last *complete* exchange, not from two consecutive user
+      turns (which would break strict alternating-role chat templates, I7).
+  - **`session/cancel`** (client→agent, **notification**, no `id`, no response): params `{"sessionId": str}`. Sets
+    `cancel_event` for that session if it exists and has a prompt in flight; unknown or idle session ids are ignored
+    (idempotent, matches `/v1/unload`'s idempotence style).
+    - **Known limitation — cancel is session-scoped, not turn-scoped.** ACP's `session/cancel` carries only a `sessionId`,
+      no id correlating it to a specific `session/prompt` call. If a client sends `session/cancel` for a turn that has
+      already resolved (the client raced its own next `session/prompt` ahead of receiving that resolution, or sent a
+      cancel after already reading the response), and a new prompt on the same session is already in flight by the time
+      the stale cancel is processed, the stale cancel takes effect against that *new* prompt instead of being a no-op.
+      This is only reachable if the client itself sends a new `session/prompt` before it has received the previous one's
+      `stopReason` — an ACP client that waits for each turn to resolve before starting the next (the expected pattern)
+      never hits it. Fixing this fully would need a per-turn correlation id, which ACP's `session/cancel` does not carry;
+      not addressed in this milestone.
+  - **Unknown methods** (including `session/load`, any `fs/*` or `terminal/*` call arriving from a client that assumes
+    Phase 13/14 capabilities Prism has not advertised) get MCP's existing pattern: `-32601 Method not found` when the
+    request carries an `id`; a notification with no `id` and an unknown method is silently dropped.
+  - **Malformed-but-JSON-valid input never crashes the process.** `_dispatch` wraps its whole method-routing body in a
+    single `try/except Exception`: a wrong-typed `params` (a list or string instead of an object), a `prompt` that is
+    `null`, a string, or a list of non-objects, or any other shape a handler does not expect turns into a JSON-RPC error
+    response (`code: -32602`) on the request's `id` — or, for a request that is not even a JSON object, or a notification
+    with no `id`, is silently absorbed with no response — instead of an unhandled exception escaping the `for line in
+    sys.stdin:` loop and killing every session the editor has open. This applies to the synchronous handlers
+    (`initialize`, `session/new`, `session/cancel`, and the prompt-extraction half of `session/prompt` that runs before
+    its worker thread is spawned); the worker thread itself (`_run_prompt`) already has its own `try/except Exception`
+    (see the Errors bullet above), so a fault there was already isolated to that one `session/prompt` request.
+  - **`prism connect acp`**: mirrors `prism connect mcp --target ...` — prints (and with `--write`, merges into) a Zed
+    `settings.json` `agent_servers` entry pointing at `prism acp` (no network config needed; ACP is stdio-launched by the
+    editor, like MCP). `docs/integrations.md` gets an "ACP (Zed)" section next to "MCP server" documenting the table of
+    methods above and the connector command.
+  - **Not yet planned** (tracked in `plan.md` Phase 3 backlog, gated by `intent.md` non-goal §4.5 until promoted): fs-mediated
+    `session/prompt` tool calls (`fs/read_text_file`, `fs/write_text_file`, agent-initiated `session/update` of type
+    `"tool_call"` / `"tool_call_update"`, and `session/request_permission` before a write) and `terminal/*` command
+    execution. Constraint §3.7 ("no direct file or process access from the ACP agent") only becomes load-bearing once
+    those phases are built; this milestone does no file or process I/O of any kind, so it is vacuously satisfied.
+  - No invariant changes (I1–I8 still hold: I2's serialization is unaffected because ACP goes through the same
+    `ActiveEngineManager`/HTTP path as every other client; I4 stays stdlib-only — no ACP SDK dependency, hand-rolled
+    JSON-RPC like `mcp.py`). Stdlib-only.
+  - Docs: `docs/integrations.md` new "ACP (Zed)" section; `docs/cli.md` new `prism acp` and `prism connect acp` entries
+    (enforced by `tests/test_docs.py`); `docs/getting-started.md` Environment table gets a row for `$PRISM_ACP_MODEL`.
+    `CHANGELOG.md [Unreleased]` gets a `### Added` entry.
+
 ### Implemented (Phase 1: Parallel use must not exhaust the machine)
 
 - **P1 Resource budget** (`prism/resources.py`): before an ONNX model is loaded, `check_can_load(model_path, device)` compares free

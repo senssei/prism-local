@@ -1125,6 +1125,75 @@ class TestToolsRejected(ServerTestBase):
         self.assertEqual(resp.status, 200)
 
 
+@unittest.skipUnless(jinja_available(), "tool_choice narrowing on ONNX needs the optional jinja2")
+class TestToolChoice(ServerTestBase):
+    """Phase 10 / P14 (spec.md): `_tools_param` honours the four accepted `tool_choice` shapes
+    (`"none" | "auto" | "required" | {"type": "function", "function": {"name": ...}}`).
+    Today `_tools_param` only special-cases `"none"`; `"function":{"name":"get_weather"}` is
+    silently treated as `"auto"` and the full tools list goes to the engine — every model
+    that would have picked a different tool silently picks the wrong one. The new contract
+    narrows the tools list to just the named tool (no engine can see the others), and the
+    engine never starts for an unknown function name (400 with a message that names it)."""
+
+    def setUp(self):
+        super().setUp()
+        d = make_model(self.tmp, "tool-model", "qwen2")
+        with open(os.path.join(d, "tokenizer_config.json"), "w") as f:
+            json.dump({"chat_template": TOOL_TEMPLATE}, f)
+        # Three tools — only `get_weather` will be visible after narrowing, never `get_time` or `send_email`.
+        self.three_tools = [
+            WEATHER_TOOL,
+            {"type": "function", "function": {"name": "get_time", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "send_email", "parameters": {"type": "object"}}},
+        ]
+        FakeEngine.pieces = ["It is sunny."]  # ordinary answer so `tool_choice` narrowing is the only thing under test
+
+    def test_tool_choice_function_narrows_tools_to_named_one(self):
+        """P14: `tool_choice={"type":"function","function":{"name":"get_weather"}}` plus
+        `tools=[get_weather, get_time, send_email]` → the engine sees only `get_weather`
+        in the rendered prompt. Today: the full list is rendered."""
+        resp, _ = self.chat(model="tool-model", tools=self.three_tools,
+                            tool_choice={"type": "function", "function": {"name": "get_weather"}})
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(len(FakeEngine.prompts), 1)
+        prompt = FakeEngine.prompts[0]
+        self.assertIn("get_weather;", prompt)
+        self.assertNotIn("get_time;", prompt)
+        self.assertNotIn("send_email;", prompt)
+
+    def test_tool_choice_unknown_function_name_returns_400(self):
+        """P14 / Phase 10 / 10.1: naming a tool that is not in the supplied list is a hard
+        400 from `_tools_param`, before the engine is ever touched. Today: the request
+        silently routes with the full tools list."""
+        resp, data = self.chat(model="tool-model", tools=self.three_tools,
+                               tool_choice={"type": "function", "function": {"name": "nonexistent"}})
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(data["error"]["type"], "invalid_request_error")
+        self.assertIn("nonexistent", data["error"]["message"])
+        self.assertEqual(FakeEngine.prompts, [])  # the engine was never touched — the lock was never acquired
+
+    def test_tool_choice_invalid_shape_returns_400(self):
+        """P14: any `tool_choice` that is not one of the four accepted shapes is a 400 with
+        a message that names them all. Today: `42` (a wrong type) and `"sometimes"` (a
+        non-string, non-dict scalar) slip through and are silently treated as `"auto"`."""
+        for bad in (42, "sometimes", ["array", "is", "not", "valid"]):
+            resp, data = self.chat(model="tool-model", tools=self.three_tools, tool_choice=bad)
+            self.assertEqual(resp.status, 400, bad)
+            self.assertEqual(data["error"]["type"], "invalid_request_error")
+            self.assertIn("tool_choice", data["error"]["message"])
+        self.assertEqual(FakeEngine.prompts, [])  # the engine was never touched for any of the three
+
+    def test_tool_choice_none_still_drops_tools(self):
+        """Regression for Phase 7's tests: `tool_choice="none"` keeps hiding tools from
+        the rendered prompt even though `_tools_param` is now branching on more shapes.
+        Guards `TestToolCalling.test_tool_choice_none_hides_the_tools`."""
+        resp, _ = self.chat(model="tool-model", tools=self.three_tools, tool_choice="none")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(len(FakeEngine.prompts), 1)
+        prompt = FakeEngine.prompts[0]
+        self.assertNotIn("TOOLS:", prompt)
+
+
 @unittest.skipUnless(jinja_available(), "tool calling on ONNX models needs the optional jinja2")
 class TestToolTemplateFailure(ServerTestBase):
     """P11 (spec.md): when a chat template mentions `tools` (so `supports_tools` says True) but the render raises

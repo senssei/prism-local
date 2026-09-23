@@ -57,7 +57,7 @@ Trailing slashes are accepted.
 | `stop` | A string or a list of up to 4 strings. Generation ends at the first match, which is not included in the text; `finish_reason` is `stop` |
 | `max_tokens` / `max_completion_tokens` | Default 512, must be ≥ 1. For ONNX models whose `genai_config.json` states a `context_length`, it is capped to the room left after the prompt (`finish_reason` is then `length`); a prompt that fills the window is a `400` `context_length_exceeded` |
 | `tools` | OpenAI function tools (`[{"type": "function", "function": {"name", "description", "parameters"}}]`); see [Tool calling](#tool-calling) |
-| `tool_choice` | `"none"` hides the tools for this request. Any other value is treated as `"auto"`: Prism cannot force a call |
+| `tool_choice` | One of `"none"`, `"auto"`, `"required"`, or `{"type": "function", "function": {"name": "<tool_name>"}}`. `"none"` drops the tools; `"auto"` and `"required"` send the full list; the structured form narrows the list to the single tool named `<tool_name>` (a name that is not in `tools` is `400 invalid_request_error`). Any other shape is a `400`. |
 | `temperature` | Default 0.1; `0` means greedy decoding |
 | `top_p` | Default 0.9 |
 | `top_k` | Integer ≥ 1 (an extension to the OpenAI API). ONNX: applies when sampling, default the model's `search.top_k` from `genai_config.json` when that is above 1, else 40. Ollama: passed on |
@@ -96,6 +96,15 @@ Send the result back as a `{"role": "tool", "tool_call_id": ..., "content": ...}
   chunk (if present), a content chunk and/or one `tool_calls` delta, then the `finish_reason` chunk. Without `tools` streaming is token by token as before.
 - **Ollama models** get `tools` passed to the daemon, which parses the calls itself (use a model that supports tools, such as `llama3.1` or `qwen2.5`).
 - Whether a call is *right* depends on the model; small models are unreliable. Prism guarantees the shape of the reply, not the choice of tool.
+
+`tool_choice` is honored, not silently rewritten:
+
+- `"none"` → `tools` is dropped from the prompt; the model answers as if no tools were sent.
+- `"auto"` (or absent) → the full `tools` list goes to the model; the model picks.
+- `"required"` → the full list goes to the model. Open-source models rarely support "force a call" themselves; Prism keeps the tools in scope and the model decides.
+- `{"type": "function", "function": {"name": "<tool_name>"}}` → the list is narrowed to the single tool whose name matches `<tool_name>`. If `<tool_name>` is not in `tools`, the request is `400 invalid_request_error` before the engine is ever touched.
+
+Prism's `supports_tools` decision is a structural check on the chat template, not a text scan: the symbol `tools` must appear inside a Jinja expression (`{{ ... tools ... }}`) or a Jinja block that uses it (`{% if tools %}`, `{% for t in tools %}`, `{% set t = tools %}`, etc.); a template that only mentions `tools` in a `{# comment #}` or in prose no longer falsely reports support.
 
 ## Embeddings
 
