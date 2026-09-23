@@ -405,7 +405,7 @@ of a synchronous stdio loop plus daemon timers).
 
 ## Phase 13: ACP fs-mediated tool calls — `read_file`, `write_file`
 
-> Status: Phase 13 complete and reviewed. Independent review found 16 findings (4 CRITICAL, 3 HIGH, 5 MEDIUM, 3 LOW, 1 NIT); 14 fixed test-first (11 new tests in tests/test_prism_acp.py, proven red before fixing; 533 tests passing), 1 deemed not a defect (re-initialize), 1 dropped as NIT (buffering when tools active). Gate green.
+> Status: Phase 13 complete and reviewed. Round 1 independent review found 16 findings (14 fixed test-first with 11 new tests, 1 not a defect, 1 nit dropped). Round 2 independent review found 9 findings (2 CRITICAL, 2 HIGH, 2 MEDIUM, 2 LOW, 1 NIT); all actionable findings fixed test-first (6 new tests in TestPhase13Round2ReviewFindings, proven red before fixing). Gate green: 539 tests passing, CHANGELOG updated, sdlc_check.py exits 0.
 
 > **Goal.** Make `prism acp` advertise two model tools — `read_file(path)` and `write_file(path, content)` — and execute
 > them by mediating the ACP client's `fs/read_text_file` and `fs/write_text_file` JSON-RPC methods. The ACP agent

@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -130,11 +131,13 @@ def _write(obj: Dict[str, Any]) -> bool:
 
 
 def _send_result(req_id: Any, result: Dict[str, Any]) -> None:
-    _write({"jsonrpc": "2.0", "id": req_id, "result": result})
+    if req_id is not None:
+        _write({"jsonrpc": "2.0", "id": req_id, "result": result})
 
 
 def _send_error(req_id: Any, code: int, message: str) -> None:
-    _write({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
+    if req_id is not None:
+        _write({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
 
 
 def _send_notification(method: str, params: Dict[str, Any]) -> None:
@@ -270,37 +273,30 @@ def _request_fs_read(session: _Session, path: str, line: Optional[int] = None, l
         params["line"] = line
     if limit is not None:
         params["limit"] = limit
-    try:
-        return _send_request("fs/read_text_file", params, cancel_event=session.cancel_event)
-    except TypeError:
-        return _send_request("fs/read_text_file", params)
+    return _send_request("fs/read_text_file", params, cancel_event=session.cancel_event)
 
 
 def _request_fs_write(session: _Session, path: str, content: str) -> Dict[str, Any]:
     params: Dict[str, Any] = {"sessionId": session.session_id, "path": path, "content": content}
-    try:
-        return _send_request("fs/write_text_file", params, cancel_event=session.cancel_event)
-    except TypeError:
-        return _send_request("fs/write_text_file", params)
+    return _send_request("fs/write_text_file", params, cancel_event=session.cancel_event)
 
 
 def _request_fs_permission(session: _Session, call_id: str, path: str) -> Tuple[str, Optional[str]]:
     """Returns (status, message) where status is 'allow', 'reject', 'cancelled', or 'error'."""
     if session.cancel_event.is_set():
         return ("cancelled", None)
+    clean_path = path.strip() if path else ""
+    title = f"Write {clean_path}" if clean_path else "Write file"
     params = {
         "sessionId": session.session_id,
-        "toolCall": {"toolCallId": call_id, "title": f"Write {path}", "kind": "edit"},
+        "toolCall": {"toolCallId": call_id, "title": title, "kind": "edit"},
         "options": [
             {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
             {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"},
         ],
     }
     try:
-        try:
-            resp = _send_request("session/request_permission", params, cancel_event=session.cancel_event)
-        except TypeError:
-            resp = _send_request("session/request_permission", params)
+        resp = _send_request("session/request_permission", params, cancel_event=session.cancel_event)
     except AcpClientError as ex:
         if "cancelled" in str(ex).lower():
             return ("cancelled", None)
@@ -397,7 +393,7 @@ def _server_delta_stream(messages: List[Dict[str, Any]], model: str,
     return _iter_sse_response(resp)
 
 
-def _iter_sse_response(resp) -> Iterator[Dict[str, str]]:
+def _iter_sse_response(resp) -> Iterator[Dict[str, Any]]:
     try:
         for raw_line in resp:
             line = raw_line.decode("utf-8").strip()
@@ -413,6 +409,8 @@ def _iter_sse_response(resp) -> Iterator[Dict[str, str]]:
                 yield {"content": delta["content"]}
             if delta.get("reasoning_content"):
                 yield {"reasoning_content": delta["reasoning_content"]}
+            if delta.get("tool_calls"):
+                yield {"tool_calls": delta["tool_calls"]}
     finally:
         resp.close()
 
@@ -505,6 +503,7 @@ def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
                 deltas = _direct_engine_delta_stream(session, session.messages, tools=tools or None)
 
             answer: List[str] = []
+            server_calls: List[Dict[str, Any]] = []
             stop_reason = "end_turn"
             for delta in deltas:
                 if session.cancel_event.is_set():
@@ -529,6 +528,22 @@ def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
                             "content": {"type": "text", "text": delta["reasoning_content"]},
                         },
                     })
+                elif "tool_calls" in delta:
+                    for tc in delta["tool_calls"]:
+                        fn = tc.get("function") or tc
+                        name = fn.get("name")
+                        raw_args = fn.get("arguments") or {}
+                        if isinstance(raw_args, str):
+                            try:
+                                args = json.loads(raw_args)
+                            except Exception:
+                                args = {}
+                        elif isinstance(raw_args, dict):
+                            args = raw_args
+                        else:
+                            args = {}
+                        if name:
+                            server_calls.append({"name": name, "arguments": args})
 
             if stop_reason == "cancelled":
                 _cancel_and_return()
@@ -536,6 +551,8 @@ def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
 
             raw_text = "".join(answer)
             content_text, calls = parse_tool_calls(raw_text)
+            if server_calls:
+                calls = server_calls
 
             if tools and content_text:
                 _send_notification("session/update", {
@@ -556,7 +573,12 @@ def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
                 )
                 return
 
-            session.messages.append({"role": "assistant", "content": raw_text})
+            from prism.tools import to_openai_tool_calls
+            session.messages.append({
+                "role": "assistant",
+                "content": content_text or raw_text or None,
+                "tool_calls": to_openai_tool_calls(calls),
+            })
 
             for call in calls:
                 if session.cancel_event.is_set():
@@ -570,9 +592,14 @@ def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
                 if not isinstance(args, dict):
                     args = {}
 
+                clean_path = str(args.get("path", "")).strip()
                 kind = "read" if tool_name == "read_file" else ("edit" if tool_name == "write_file" else "think")
-                title = f"Read {args.get('path', '')}" if tool_name == "read_file" else (
-                    f"Write {args.get('path', '')}" if tool_name == "write_file" else f"Call {tool_name}"
+                title = f"Read {clean_path}" if (tool_name == "read_file" and clean_path) else (
+                    "Read file" if tool_name == "read_file" else (
+                        f"Write {clean_path}" if (tool_name == "write_file" and clean_path) else (
+                            "Write file" if tool_name == "write_file" else f"Call {tool_name}"
+                        )
+                    )
                 )
 
                 _send_notification("session/update", {
@@ -635,6 +662,9 @@ def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
                             })
                             session.messages.append({"role": "tool", "tool_call_id": call_id, "content": err_msg})
                     except Exception as ex:
+                        if session.cancel_event.is_set() or "cancelled" in str(ex).lower():
+                            _cancel_and_return()
+                            return
                         err_msg = str(ex)
                         _send_notification("session/update", {
                             "sessionId": session.session_id,
@@ -719,6 +749,9 @@ def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
                             })
                             session.messages.append({"role": "tool", "tool_call_id": call_id, "content": success_msg})
                         except Exception as ex:
+                            if session.cancel_event.is_set() or "cancelled" in str(ex).lower():
+                                _cancel_and_return()
+                                return
                             err_msg = str(ex)
                             _send_notification("session/update", {
                                 "sessionId": session.session_id,
@@ -898,6 +931,8 @@ def run_acp_server() -> None:
     finally:
         _close_pending()
         with _sessions_lock:
+            for s in _sessions.values():
+                s.cancel_event.set()
             _sessions.clear()
         _client_fs_capabilities["readTextFile"] = False
         _client_fs_capabilities["writeTextFile"] = False

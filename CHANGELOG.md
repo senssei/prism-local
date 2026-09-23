@@ -7,6 +7,10 @@ versions may include breaking changes).
 ## [Unreleased]
 
 ### Fixed
+- `prism acp`: fixed a `NameError` on `time` during request timeout/cancellation, forwarded structured SSE `tool_calls`
+  emitted by `prism serve` to the ACP agent tool-execution loop, properly propagated turn cancellation during
+  `fs/read_text_file` and `fs/write_text_file` RPCs instead of recording false tool failures, silenced JSON-RPC response
+  frames for notifications lacking an `id`, and ensured worker threads for active sessions are cancelled upon EOF.
 - `prism acp`'s direct-engine fallback (used when `prism serve` is unreachable) gave an unhelpful raw
   `KeyError`/`AttributeError` message when the session's model was an Ollama model or unresolvable, instead of the
   clear "start the server" message `prism mcp`'s equivalent fallback already gives; it now checks the resolved

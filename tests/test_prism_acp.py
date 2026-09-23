@@ -843,7 +843,7 @@ class TestAcpToolLoop(AcpTestCase):
         captured = []
         fs_requests = []
 
-        def fake_send_request(method, params, *, timeout=None):
+        def fake_send_request(method, params, **kwargs):
             fs_requests.append((method, params))
             if method == "fs/read_text_file":
                 return {"content": "hello"}
@@ -893,7 +893,7 @@ class TestAcpToolLoop(AcpTestCase):
         captured = []
         calls_order = []
 
-        def fake_send_request(method, params, *, timeout=None):
+        def fake_send_request(method, params, **kwargs):
             calls_order.append(method)
             if method == "session/request_permission":
                 return {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
@@ -933,7 +933,7 @@ class TestAcpToolLoop(AcpTestCase):
         captured = []
         calls = []
 
-        def fake_send_request(method, params, *, timeout=None):
+        def fake_send_request(method, params, **kwargs):
             calls.append(method)
             if method == "session/request_permission":
                 return {"outcome": {"outcome": "selected", "optionId": "reject_once"}}
@@ -968,7 +968,7 @@ class TestAcpToolLoop(AcpTestCase):
 
         captured = []
 
-        def fake_send_request(method, params, *, timeout=None):
+        def fake_send_request(method, params, **kwargs):
             if method == "session/request_permission":
                 return {"outcome": {"outcome": "cancelled"}}
             return {}
@@ -997,7 +997,7 @@ class TestAcpToolLoop(AcpTestCase):
 
         captured = []
 
-        def fake_send_request(method, params, *, timeout=None):
+        def fake_send_request(method, params, **kwargs):
             if method == "fs/read_text_file":
                 raise acp.AcpClientError(-32600, "File not found")
             return {}
@@ -1023,7 +1023,7 @@ class TestAcpToolLoop(AcpTestCase):
 
         captured = []
 
-        def fake_send_request(method, params, *, timeout=None):
+        def fake_send_request(method, params, **kwargs):
             return {"content": "loop"}
 
         with patch("prism.acp._server_delta_stream", side_effect=fake_stream), \
@@ -1052,7 +1052,7 @@ class TestAcpToolLoop(AcpTestCase):
             turn += 1
             return iter([{"content": '<tool_call>{"name":"read_file","arguments":{"path":"/x"}}</tool_call>'}])
 
-        def fake_send_request(method, params, *, timeout=None):
+        def fake_send_request(method, params, **kwargs):
             calls.append(method)
             acp._sessions[session_id].cancel_event.set()
             return {"content": "x"}
@@ -1107,7 +1107,7 @@ class TestAcpToolLoop(AcpTestCase):
             return iter([{"content": "done"}])
 
         captured = []
-        def fake_send_request(method, params, *, timeout=None):
+        def fake_send_request(method, params, **kwargs):
             if method == "session/request_permission":
                 return {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
             return {"content": "ok"}
@@ -1167,7 +1167,7 @@ class TestAcpAgentNeverTouchesFiles(AcpTestCase):
                 return iter([{"content": '<tool_call>{"name":"read_file","arguments":{"path":"/secret"}}</tool_call><tool_call>{"name":"write_file","arguments":{"path":"/out","content":"data"}}</tool_call>'}])
             return iter([{"content": "done"}])
 
-        def fake_send_request(method, params, *, timeout=None):
+        def fake_send_request(method, params, **kwargs):
             if method == "session/request_permission":
                 return {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
             return {"content": "file contents"}
@@ -1417,6 +1417,99 @@ class TestPhase13ReviewFindings(AcpTestCase):
     def test_initialize_handles_non_dict_client_capabilities(self):
         resp = acp.handle_initialize({"protocolVersion": 1, "clientCapabilities": "invalid_string"})
         self.assertEqual(resp["protocolVersion"], 1)
+
+
+class TestPhase13Round2ReviewFindings(AcpTestCase):
+    def test_send_request_with_cancel_event_does_not_raise_name_error_for_time(self):
+        evt = threading.Event()
+        captured = []
+        with patch("prism.acp._write", side_effect=captured.append):
+            with self.assertRaises(TimeoutError):
+                acp._send_request("test", {}, cancel_event=evt, timeout=0.01)
+
+    def test_iter_sse_response_extracts_structured_tool_calls(self):
+        chunk1 = json.dumps({"choices": [{"index": 0, "delta": {"tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": "{\"path\":\"/f\"}"}}]}, "finish_reason": None}]})
+        chunk2 = json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+        raw = f"data: {chunk1}\n\ndata: {chunk2}\n\ndata: [DONE]\n\n"
+        items = list(acp._iter_sse_response(io.BytesIO(raw.encode("utf-8"))))
+        self.assertEqual(len(items), 1)
+        self.assertIn("tool_calls", items[0])
+        self.assertEqual(items[0]["tool_calls"][0]["function"]["name"], "read_file")
+
+    def test_session_prompt_with_structured_sse_tool_calls_executes_tool(self):
+        turn = 0
+        def fake_stream(*_a, **_k):
+            nonlocal turn
+            turn += 1
+            if turn == 1:
+                return iter([
+                    {"content": "Thinking..."},
+                    {"tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": "{\"path\":\"/secret\"}"}}]},
+                ])
+            return iter([{"content": "Done reading."}])
+
+        captured = []
+        fs_calls = []
+        def fake_send_request(method, params, **kwargs):
+            fs_calls.append(method)
+            return {"content": "file data"}
+
+        with patch("prism.acp._server_delta_stream", side_effect=fake_stream), \
+             patch("prism.acp._write", side_effect=captured.append), \
+             patch("prism.acp._send_request", side_effect=fake_send_request):
+            session_id = self._new_session()
+            acp._sessions[session_id].client_capabilities = {"readTextFile": True, "writeTextFile": True}
+            t = acp.handle_session_prompt({"sessionId": session_id, "prompt": [{"type": "text", "text": "read"}]}, 1)
+            t.join(2.0)
+            self.assertFalse(t.is_alive())
+
+        self.assertIn("fs/read_text_file", fs_calls)
+        tool_updates = [m for m in captured if m.get("method") == "session/update" and m.get("params", {}).get("update", {}).get("sessionUpdate") == "tool_call_update"]
+        self.assertEqual(tool_updates[0]["params"]["update"]["status"], "completed")
+
+    def test_cancel_during_fs_read_or_write_cancels_turn_without_failed_update(self):
+        turn = 0
+        def fake_stream(*_a, **_k):
+            nonlocal turn
+            turn += 1
+            if turn == 1:
+                return iter([{"content": '<tool_call>{"name":"read_file","arguments":{"path":"/slow"}}</tool_call>'}])
+            return iter([{"content": "Never"}])
+
+        captured = []
+        def fake_send_request(method, params, **kwargs):
+            raise acp.AcpClientError(-32000, "ACP request 'fs/read_text_file' (id=1) cancelled")
+
+        with patch("prism.acp._server_delta_stream", side_effect=fake_stream), \
+             patch("prism.acp._write", side_effect=captured.append), \
+             patch("prism.acp._send_request", side_effect=fake_send_request):
+            session_id = self._new_session()
+            session = acp._sessions[session_id]
+            session.client_capabilities = {"readTextFile": True}
+            t = acp.handle_session_prompt({"sessionId": session_id, "prompt": [{"type": "text", "text": "read"}]}, 1)
+            t.join(2.0)
+            self.assertFalse(t.is_alive())
+
+        failed_updates = [m for m in captured if m.get("method") == "session/update" and m.get("params", {}).get("update", {}).get("sessionUpdate") == "tool_call_update" and m.get("params", {}).get("update", {}).get("status") == "failed"]
+        self.assertEqual(failed_updates, [])
+        resps = [m for m in captured if m.get("id") == 1]
+        self.assertEqual(resps[0]["result"]["stopReason"], "cancelled")
+
+    def test_notification_without_id_does_not_receive_response_frame(self):
+        captured = []
+        with patch("prism.acp._write", side_effect=captured.append):
+            acp._dispatch({"jsonrpc": "2.0", "method": "initialize", "params": {}})
+            acp._dispatch({"jsonrpc": "2.0", "method": "session/new", "params": {}})
+            acp._dispatch({"jsonrpc": "2.0", "method": "session/prompt", "params": {}})
+        self.assertEqual(captured, [])
+
+    def test_run_acp_server_cancels_active_sessions_on_eof(self):
+        session_id = self._new_session()
+        session = acp._sessions[session_id]
+        self.assertFalse(session.cancel_event.is_set())
+        with patch("sys.stdin", io.StringIO("")):
+            acp.run_acp_server()
+        self.assertTrue(session.cancel_event.is_set())
 
 
 if __name__ == "__main__":
