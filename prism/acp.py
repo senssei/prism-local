@@ -27,6 +27,11 @@ ACP_PROTOCOL_VERSION = 1
 _stdout_lock = threading.Lock()
 _catalog_instance: Optional[ModelCatalog] = None
 _manager = None
+# RLock, not Lock: `_engine_manager()` calls `_catalog()` while already holding this lock, so a
+# plain non-reentrant Lock would self-deadlock the first time it runs (review finding — acp.py is
+# the one file in this codebase that actually calls these lazily-initialized singletons from more
+# than one thread, since `session/prompt` runs on its own daemon thread).
+_state_lock = threading.RLock()
 _sessions: Dict[str, "_Session"] = {}
 _sessions_lock = threading.Lock()
 
@@ -42,7 +47,8 @@ class _Session:
 
 
 class AcpRequestError(Exception):
-    """A `session/prompt` request that must fail before any generation starts."""
+    """A request whose incoming shape was explicitly validated and found malformed — always
+    -32602 Invalid params. Never raised for an unrelated internal fault (see `_dispatch`)."""
 
     def __init__(self, code: int, message: str):
         super().__init__(message)
@@ -52,18 +58,26 @@ class AcpRequestError(Exception):
 
 def _catalog() -> ModelCatalog:
     global _catalog_instance
-    if _catalog_instance is None:
-        _catalog_instance = ModelCatalog()
-    return _catalog_instance
+    with _state_lock:
+        if _catalog_instance is None:
+            _catalog_instance = ModelCatalog()
+        return _catalog_instance
 
 
 def _engine_manager():
-    """The in-process engine manager used only when `prism serve` is unreachable (mirrors `mcp.py`)."""
+    """The in-process engine manager used only when `prism serve` is unreachable (mirrors `mcp.py`).
+
+    Two sessions can independently hit the direct-engine fallback on their own daemon threads at
+    the same time; without a lock here, both could pass the `is None` check before either finishes
+    constructing, producing two `ActiveEngineManager`s (and so two engine locks) — exactly the
+    concurrent-model-load scenario AGENTS.md and invariant I2 forbid.
+    """
     global _manager
-    if _manager is None:
-        from prism.server import ActiveEngineManager
-        _manager = ActiveEngineManager(catalog=_catalog())
-    return _manager
+    with _state_lock:
+        if _manager is None:
+            from prism.server import ActiveEngineManager
+            _manager = ActiveEngineManager(catalog=_catalog())
+        return _manager
 
 
 def _auth_headers(headers: Dict[str, str]) -> Dict[str, str]:
@@ -84,7 +98,10 @@ def _write(obj: Dict[str, Any]) -> None:
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
         except (BrokenPipeError, OSError, ValueError) as ex:
-            sys.stderr.write(f"prism acp: dropped a response, stdout is gone ({ex}).\n")
+            try:
+                sys.stderr.write(f"prism acp: dropped a response, stdout is gone ({ex}).\n")
+            except Exception:
+                pass  # stderr is gone too; nothing left to report to, but still must not raise
 
 
 def _send_result(req_id: Any, result: Dict[str, Any]) -> None:
@@ -130,9 +147,20 @@ def handle_session_new(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"sessionId": session_id}
 
 
-def _extract_prompt_text(prompt: List[Dict[str, Any]]) -> str:
+def _require_session_id(params: Dict[str, Any]) -> str:
+    session_id = params.get("sessionId")
+    if not isinstance(session_id, str):
+        raise AcpRequestError(-32602, "sessionId must be a string")
+    return session_id
+
+
+def _extract_prompt_text(prompt: Any) -> str:
+    if not isinstance(prompt, list):
+        raise AcpRequestError(-32602, "prompt must be a list of content blocks")
     parts = []
     for block in prompt:
+        if not isinstance(block, dict):
+            raise AcpRequestError(-32602, "each prompt content block must be an object")
         block_type = block.get("type")
         if block_type != "text":
             raise AcpRequestError(-32602, f"Unsupported prompt content block type: {block_type!r}")
@@ -191,16 +219,14 @@ def _direct_engine_delta_stream(session: "_Session", messages: List[Dict[str, st
 
 
 def handle_session_prompt(params: Dict[str, Any], req_id: Any) -> Optional[threading.Thread]:
-    session_id = params.get("sessionId")
-    with _sessions_lock:
-        session = _sessions.get(session_id)
-    if session is None:
-        _send_error(req_id, -32602, f"Unknown sessionId: {session_id!r}")
-        return None
-    if session.busy:
-        _send_error(req_id, -32602, "a prompt is already in progress for this session")
-        return None
     try:
+        session_id = _require_session_id(params)
+        with _sessions_lock:
+            session = _sessions.get(session_id)
+        if session is None:
+            raise AcpRequestError(-32602, f"Unknown sessionId: {session_id!r}")
+        if session.busy:
+            raise AcpRequestError(-32602, "a prompt is already in progress for this session")
         prompt_text = _extract_prompt_text(params.get("prompt", []))
     except AcpRequestError as ex:
         _send_error(req_id, ex.code, ex.message)
@@ -269,6 +295,8 @@ def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
 
 def handle_session_cancel(params: Dict[str, Any]) -> None:
     session_id = params.get("sessionId")
+    if not isinstance(session_id, str):
+        return  # malformed notification; nothing to cancel, and no response is expected anyway
     with _sessions_lock:
         session = _sessions.get(session_id)
     if session is not None:
@@ -276,15 +304,25 @@ def handle_session_cancel(params: Dict[str, Any]) -> None:
 
 
 def _dispatch(req: Dict[str, Any]) -> None:
-    """Routes one JSON-RPC message. A malformed-but-JSON-valid message (wrong-typed `params`, a
-    non-list `prompt`, ...) must turn into an error response, never an exception that kills the
-    stdio loop and every session in it (review finding: `handle_initialize`, `handle_session_new`,
-    `handle_session_cancel`, and the synchronous half of `handle_session_prompt` all assume
-    well-shaped input)."""
+    """Routes one JSON-RPC message.
+
+    Two exception tiers, on purpose: `AcpRequestError` is raised only where the incoming shape has
+    been explicitly validated (non-dict `params`, a `sessionId` that isn't a string, a `prompt`
+    that isn't a list of objects, ...) and always means -32602 Invalid params. Anything else —
+    including an `AttributeError`/`TypeError` from a genuine internal bug elsewhere in the call
+    chain (e.g. a catalog entry with an unexpected field type) — is reported as -32603 Internal
+    error instead. An earlier revision classified by exception *type* rather than by this explicit
+    contract; that is unsound, because an internal bug can raise the exact same `AttributeError` /
+    `TypeError` a malformed request raises, and would have been mislabeled -32602 (review finding).
+    """
     req_id = req.get("id") if isinstance(req, dict) else None
     try:
         method = req.get("method")
-        params = req.get("params") or {}
+        params = req.get("params")
+        params = params if params is not None else {}
+        if method in ("initialize", "session/new", "session/prompt", "session/cancel") \
+                and not isinstance(params, dict):
+            raise AcpRequestError(-32602, f"params must be an object for method {method!r}")
 
         if method == "initialize":
             _send_result(req_id, handle_initialize(params))
@@ -299,16 +337,25 @@ def _dispatch(req: Dict[str, Any]) -> None:
         else:
             if req_id is not None:
                 _send_error(req_id, -32601, f"Method not found: {method}")
-    except (AttributeError, TypeError, IndexError, KeyError) as ex:
-        # The shape of `params`/`prompt` was wrong (e.g. `.get` on a list, iterating `None`) —
-        # this is the class of exception a malformed-but-JSON-valid message actually raises.
+    except AcpRequestError as ex:
         if req_id is not None:
-            _send_error(req_id, -32602, f"Invalid params: {ex}")
+            _send_error(req_id, ex.code, ex.message)
     except Exception as ex:
-        # Anything else (e.g. a catalog/filesystem fault inside `_default_model`) is a genuine
-        # internal fault, not a bad request — don't mislabel it as "Invalid params" (review finding).
         if req_id is not None:
             _send_error(req_id, -32603, f"Internal error: {ex}")
+
+
+def _handle_line(line: str) -> None:
+    """Parses and dispatches one stdio line. Must never raise: `json.loads` on a syntactically
+    invalid line raises `json.JSONDecodeError`, but on a pathologically deep structure (e.g.
+    thousands of nested `[`) it raises `RecursionError` instead — a third, JSON-valid-shaped crash
+    vector `_dispatch`'s own hardening cannot see because the exception happens before `_dispatch`
+    is ever called (review finding)."""
+    try:
+        req = json.loads(line)
+        _dispatch(req)
+    except Exception as ex:
+        sys.stderr.write(f"prism acp: dropped one malformed request ({ex}).\n")
 
 
 def run_acp_server() -> None:
@@ -320,11 +367,7 @@ def run_acp_server() -> None:
         line = line.strip()
         if not line:
             continue
-        try:
-            req = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        _dispatch(req)
+        _handle_line(line)
 
 
 if __name__ == "__main__":

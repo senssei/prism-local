@@ -6,6 +6,15 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+- `prism.mcp`'s lazy `_catalog()`/`_engine_manager()` singletons used a plain `threading.Lock` for
+  `_state_lock`, but `_engine_manager()` calls `_catalog()` while already holding it — a
+  non-reentrant lock self-deadlocks on that nested acquire, so `prism mcp`'s direct-engine fallback
+  (used when `prism serve` is unreachable) would hang forever the first time it ran. Switched to
+  `threading.RLock`. Found while reviewing the equivalent, correctly-`RLock`'d pattern added for
+  `prism acp` (Phase 12); no test previously exercised the real `_engine_manager()` body, since
+  `TestServerlessFallback` patches `mcp._manager` directly.
+
 ### Changed
 - `prism.cli` now reads `PRISM_API_KEY` (and, by next phase, the rest of the `PRISM_*` vars) through a typed `EnvConfig` dataclass in `prism/env_config.py`. CLI flags keep precedence over the env. Defaults are unchanged for users; a typo in a var is caught once at startup instead of at first use.
 - `tool_choice` is no longer silently rewritten to `"auto"` for every non-`"none"` value. The four accepted shapes (`"none" | "auto" | "required" | {"type": "function", "function": {"name": ...}}`) are honored as OpenAI specifies: the structured form narrows `tools` to the single named tool (a name not in the list is a hard `400 invalid_request_error` before the engine is touched; the unknown shape is also a `400`). The previous behaviour silently passed the full `tools` list to the model even when the caller explicitly named one tool.
@@ -32,7 +41,12 @@ versions may include breaking changes).
   hardcoded model id `prism mcp` and `prism acp` fall back to when no local models are installed at all. A broken stdout
   pipe (the editor closed the connection) is logged and dropped instead of crashing the process; a late failure while
   reporting a completed answer no longer discards that answer; an internal fault (e.g. a catalog I/O error) is reported
-  as `-32603 Internal error` instead of being mislabeled `-32602 Invalid params`.
+  as `-32603 Internal error` instead of being mislabeled `-32602 Invalid params` — now via an explicit `AcpRequestError`
+  contract rather than guessing from exception type, since a genuine internal bug can raise the same `AttributeError`/
+  `TypeError` a malformed request raises. A pathologically deep (but syntactically valid) JSON line no longer crashes
+  the process with an uncaught `RecursionError`. The lazy `_catalog()`/`_engine_manager()` singletons are now guarded by
+  a shared `threading.RLock`, closing a race where two sessions hitting the direct-engine fallback at once could each
+  construct their own engine manager (two engine locks instead of one, risking a concurrent model load).
 - Centralised env-var schema (`prism/env_config.py`, stdlib only): one frozen `EnvConfig` dataclass declaring every `PRISM_*` variable with its type, default, and `__post_init__` validator. `EnvConfig.from_env(...)` builds an instance from a Mapping; `EnvConfig.from_env_file(path)` parses a hand-rolled `KEY=VALUE` file (whitespace, `# comment`, double/single-quoted values); `load_config()` runs at CLI / server startup, fails fast on bad values (one `ValueError` listing every problem), and emits one `logging.warning` for any unknown `PRISM_*` key. No runtime dependency — no `kev`, no `pydantic-settings`, no `python-dotenv`. `.env` file loading is opt-in only: `PRISM_ENV_FILE=/path/to/.env` (security: never auto-discover a file the operator did not name).
 - Reasoning separation: `prism.reasoning` module extracting `<think>...</think>` blocks into `message.reasoning_content` (and streaming `delta.reasoning_content`) for OpenAI-compatible `/v1/chat/completions` across ONNX and Ollama backends, while keeping raw output intact for legacy `/v1/completions`.
 - Thread control: `PRISM_THREADS` environment variable to set intra-op thread count via session_options overlay on ONNX models.

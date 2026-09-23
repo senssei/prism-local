@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -98,6 +99,32 @@ class TestServerlessFallback(unittest.TestCase):
         self.assertIsNotNone(mcp._manager.engine)
         mcp._manager.unload()
         self.assertIsNone(mcp._manager.engine)
+
+
+class TestLazySingletonDeadlock(unittest.TestCase):
+    """`_engine_manager()` calls `_catalog()` while already holding `_state_lock`; a plain
+    (non-reentrant) `Lock` self-deadlocks on that nested acquire, the very first time the fallback
+    path runs (found while reviewing prism/acp.py's identical pattern, which uses an RLock)."""
+
+    def setUp(self):
+        mcp._manager = None
+        mcp._catalog_instance = None
+
+    def tearDown(self):
+        mcp._manager = None
+        mcp._catalog_instance = None
+
+    def test_engine_manager_does_not_deadlock_when_it_calls_catalog(self):
+        result = {}
+
+        def call():
+            result["manager"] = mcp._engine_manager()
+
+        t = threading.Thread(target=call, daemon=True)
+        t.start()
+        t.join(3.0)
+        self.assertFalse(t.is_alive(), "mcp._engine_manager() appears to have deadlocked")
+        self.assertIn("manager", result)
 
 
 class TestMcpErrorHints(unittest.TestCase):

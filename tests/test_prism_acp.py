@@ -293,13 +293,82 @@ class TestEmptyCatalogDefaultModel(AcpTestCase):
 class TestStdoutWriteFailure(AcpTestCase):
     """Second-review finding #1: a broken stdout pipe must not kill the stdio loop."""
 
-    def test_broken_pipe_while_sending_an_error_does_not_raise(self):
-        with patch.object(acp.sys.stdout, "write", side_effect=BrokenPipeError("broken")):
+    def test_broken_pipe_while_sending_an_error_logs_to_stderr_and_does_not_raise(self):
+        with patch.object(acp.sys.stdout, "write", side_effect=BrokenPipeError("broken")), \
+             patch.object(acp.sys.stderr, "write") as stderr_write:
             acp._dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["x"]})
+        self.assertTrue(any("stdout is gone" in call.args[0] for call in stderr_write.call_args_list))
 
-    def test_broken_pipe_while_sending_a_normal_response_does_not_raise(self):
-        with patch.object(acp.sys.stdout, "write", side_effect=BrokenPipeError("broken")):
+    def test_broken_pipe_while_sending_a_normal_response_logs_to_stderr_and_does_not_raise(self):
+        with patch.object(acp.sys.stdout, "write", side_effect=BrokenPipeError("broken")), \
+             patch.object(acp.sys.stderr, "write") as stderr_write:
             acp._dispatch({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}})
+        self.assertTrue(any("stdout is gone" in call.args[0] for call in stderr_write.call_args_list))
+
+    def test_both_stdout_and_stderr_broken_does_not_raise(self):
+        """Third-review finding #3: `_write`'s own stderr fallback must itself be exception-safe."""
+        with patch.object(acp.sys.stdout, "write", side_effect=BrokenPipeError("stdout gone")), \
+             patch.object(acp.sys.stderr, "write", side_effect=BrokenPipeError("stderr gone too")):
+            acp._write({"jsonrpc": "2.0", "id": 1, "result": {}})
+
+
+class TestLazySingletonThreadSafety(unittest.TestCase):
+    """Third-review finding #1: `_catalog()`/`_engine_manager()` must be safe under concurrent
+    daemon threads (one per `session/prompt`), and `_engine_manager()` calling `_catalog()` while
+    holding the same lock must not self-deadlock."""
+
+    def setUp(self):
+        acp._manager = None
+        acp._catalog_instance = None
+
+    def tearDown(self):
+        acp._manager = None
+        acp._catalog_instance = None
+
+    def test_engine_manager_does_not_deadlock_when_it_calls_catalog(self):
+        result = {}
+
+        def call():
+            result["manager"] = acp._engine_manager()
+
+        t = threading.Thread(target=call, daemon=True)
+        t.start()
+        t.join(3.0)
+        self.assertFalse(t.is_alive(), "acp._engine_manager() appears to have deadlocked")
+        self.assertIn("manager", result)
+
+    def test_concurrent_calls_construct_the_engine_manager_only_once(self):
+        import prism.server as server_module
+
+        construction_started = threading.Event()
+        release = threading.Event()
+        call_count = {"n": 0}
+        real_init = server_module.ActiveEngineManager.__init__
+
+        def slow_init(self, *a, **kw):
+            call_count["n"] += 1
+            construction_started.set()
+            release.wait(2.0)
+            real_init(self, *a, **kw)
+
+        results = []
+
+        def worker():
+            results.append(acp._engine_manager())
+
+        with patch.object(server_module.ActiveEngineManager, "__init__", slow_init):
+            t1 = threading.Thread(target=worker)
+            t1.start()
+            self.assertTrue(construction_started.wait(2.0))
+            t2 = threading.Thread(target=worker)
+            t2.start()
+            release.set()
+            t1.join(2.0)
+            t2.join(2.0)
+
+        self.assertEqual(call_count["n"], 1)
+        self.assertEqual(len(results), 2)
+        self.assertIs(results[0], results[1])
 
 
 class TestCompletedAnswerSurvivesLateFailure(AcpTestCase):
@@ -347,6 +416,43 @@ class TestErrorCodeLabeling(AcpTestCase):
             acp._dispatch({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": ["x"]})
         response = next(m for m in captured if m.get("id") == 2)
         self.assertEqual(response["error"]["code"], -32602)
+
+    def test_internal_bug_raising_attribute_error_is_still_labeled_internal_error(self):
+        """Third-review finding #4: classifying by exception *type* is unsound — an internal bug
+        (here, a catalog entry with a non-string `device`) raises the exact same `AttributeError` a
+        malformed request would, and must not be mislabeled -32602 just because of that."""
+        class BadCatalog:
+            def list_all_models(self, include_ollama=True):
+                return [{"id": "x", "device": None}]  # pick_default_model does device.lower()
+
+        captured = []
+        with patch("prism.acp._catalog", return_value=BadCatalog()), \
+             patch("prism.acp._write", side_effect=captured.append):
+            acp._dispatch({"jsonrpc": "2.0", "id": 3, "method": "session/new", "params": {"cwd": "/tmp"}})
+        response = next(m for m in captured if m.get("id") == 3)
+        self.assertEqual(response["error"]["code"], -32603)
+
+    def test_non_string_session_id_is_invalid_params_not_a_crash(self):
+        captured = []
+        with patch("prism.acp._write", side_effect=captured.append):
+            acp._dispatch({"jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+                           "params": {"sessionId": ["not", "a", "string"], "prompt": []}})
+        response = next(m for m in captured if m.get("id") == 4)
+        self.assertEqual(response["error"]["code"], -32602)
+
+
+class TestPathologicalStdinLine(unittest.TestCase):
+    """Third-review finding #2: a deeply-nested-but-JSON-valid line raises `RecursionError`, not
+    `JSONDecodeError` — a third crash vector distinct from malformed shape or write failure."""
+
+    def test_deeply_nested_json_does_not_crash(self):
+        pathological = "[" * 100000 + "]" * 100000
+        with patch.object(acp.sys, "stderr"):
+            acp._handle_line(pathological)  # must not raise
+
+    def test_plain_invalid_json_is_silently_dropped(self):
+        with patch.object(acp.sys, "stderr"):
+            acp._handle_line("not json at all")  # must not raise
 
 
 class TestDirectEngineFallback(unittest.TestCase):

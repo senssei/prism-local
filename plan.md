@@ -81,6 +81,12 @@ Spec: `spec.md` section 4 (P7). Status: Phase 2 complete; review-2 found 7 issue
 - [ ] Tool calling: no silent fallback when the template render with `tools` fails (400/500 instead of answering without tools). *(Done in Phase 7 / P11; remove on Phase 3 cleanup.)*
 
 ### Small and closed
+- [x] `prism/mcp.py` `_state_lock` self-deadlock: `_engine_manager()` calls `_catalog()` while already holding
+  `_state_lock`; switched `threading.Lock()` to `threading.RLock()` so the nested acquire doesn't hang forever the
+  first time `prism mcp`'s direct-engine fallback runs. Found and fixed separately from Phase 12 (which has the same
+  pattern in `prism/acp.py`, already using `RLock`) per the operator's explicit request, not bundled into that phase's
+  diff. Test: `tests/test_prism_mcp.py::TestLazySingletonDeadlock` (bounded `Thread.join` timeout, proven red before
+  the fix — the un-fixed lock hangs the call). Gate green (487 tests).
 - [ ] `--variant`: a CLI test that passes the flag to `pull_model`; add it to the command table in `README.md`.
 - [ ] `scripts/verify_templates.py`: compare `render_prompt` with `format_prompt` for local models.
 - [ ] Telemetry: VRAM used/free in `prism doctor` and a log warning when little is free (`get_gpu_info()` already has `vram_free_mb`).
@@ -246,7 +252,47 @@ since ACP's `session/cancel` carries no turn-correlation id and a real fix would
 control — only reachable if the client itself sends a new `session/prompt` before receiving the previous one's
 `stopReason`. Gate green after fixes (474 tests); fixes verified by tests, not re-reviewed by a second fresh subagent.
 Phase 13 (fs-mediated tool calls) and Phase 14 (terminal execution) remain in the Phase 3 backlog, gated by `intent.md`
-non-goal §4.5, to be promoted one at a time. Awaiting operator decision to commit.
+non-goal §4.5, to be promoted one at a time.
+
+**Review round 3** (fresh subagent, verifying round 2's fixes and doing a new full pass): confirmed round-2 fixes (1),
+(4), (5) fully correct and (2) still a sound accepted trade-off, but found round-2 fix (3) (error-code classification)
+only partially fixed, plus 2 new issues introduced by round 2's own fixes: (new-1, high) `run_acp_server`'s stdin loop
+only caught `json.JSONDecodeError` around `json.loads`, so a syntactically-valid but pathologically deep JSON line
+(thousands of nested `[`) raises `RecursionError` instead and crashes the whole process — a third crash vector distinct
+from malformed shape (round 1) or a broken pipe (round 2), reachable because it happens before `_dispatch` is ever
+called; (new-2, medium) `_write`'s own `except`-block `sys.stderr.write` was unprotected, so a stdout-and-stderr-both-
+broken scenario would still crash; (partial-3, medium) round 2's `(AttributeError, TypeError, IndexError, KeyError)` →
+`-32602` heuristic in `_dispatch` is an unsound proxy — a genuine internal bug (e.g. a catalog entry with a non-string
+`device` field, reproduced via `pick_default_model`) raises the same `AttributeError` a malformed request raises and
+was still mislabeled `-32602` for a well-formed request. The reviewer also independently found (new-4, high, not
+previously reported in any round) that `_catalog()`/`_engine_manager()` are unguarded lazy singletons with no lock at
+all, while `acp.py` is the one file in the codebase that actually calls them from concurrent daemon threads (one per
+`session/prompt`) — two sessions hitting the direct-engine fallback at once could each construct their own
+`ActiveEngineManager`, i.e. two engine locks, risking the concurrent-model-load scenario AGENTS.md and invariant I2
+forbid. All four fixed test-first (9 new/strengthened tests, proven red against the round-2-committed baseline via
+`git stash` + `git checkout stash@{0} -- <file>` to isolate old-implementation/new-tests): `_handle_line` wraps both
+`json.loads` and `_dispatch` in one `try/except Exception`; `_write`'s stderr fallback is itself wrapped in
+`try/except: pass`; `_catalog()`/`_engine_manager()` are now guarded by a shared `threading.RLock` (`_state_lock`) —
+`RLock`, not `Lock`, because `_engine_manager()` calls `_catalog()` while already holding the lock, so a plain `Lock`
+would self-deadlock (a mistake the new `test_engine_manager_does_not_deadlock_when_it_calls_catalog` test, with a
+bounded `Thread.join` timeout, is specifically designed to catch); the error-code split was replaced with an explicit
+`AcpRequestError(code, message)` contract — raised only where a shape is actually validated
+(`_require_session_id`, `_extract_prompt_text`, the `params`-is-a-dict check in `_dispatch`) — with every other
+exception defaulting to `-32603`, instead of guessing from exception type. Gate green after round-3 fixes (486 tests).
+Fixes verified by tests only, not re-reviewed by a fourth independent pass.
+
+**Separate, out-of-scope finding reported to the operator (not fixed here):** round 3's reviewer's phrasing about
+`acp.py` lacking a lock led to discovering that `prism/mcp.py`'s *existing*, already-committed
+`_catalog()`/`_engine_manager()` (same lazy-singleton pattern, predates Phase 12) uses a plain `threading.Lock()` for
+`_state_lock`, and `_engine_manager()` calls `_catalog()` while holding it — the exact self-deadlock shape fixed in
+`acp.py` above, just with a `Lock` instead of an `RLock`. This means `prism mcp`'s direct-engine fallback path
+(`call_prism_server`'s `except urllib.error.URLError` branch) would hang forever the first time it runs, in real usage,
+not just under concurrency — `tests/test_prism_mcp.py::TestServerlessFallback` never hits it because it patches
+`mcp._manager` directly, bypassing `_engine_manager()`'s body entirely. This is a pre-existing bug from an earlier,
+already-reviewed phase, out of scope for the Phase 12 diff (no drive-by fixes per `REVIEW.md` checklist item C) — flagged
+for the operator to decide whether to fix as its own small item.
+
+Awaiting operator decision to commit.
 
 **Review round 2** (fresh subagent, verifying round 1's fixes and doing a new full pass): confirmed (1), (4), (5) fixed
 and (2) correctly documented as an accepted trade-off, but found (3) only partially fixed plus 2 new issues introduced by

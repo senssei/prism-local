@@ -50,7 +50,12 @@ _catalog_instance: Optional[ModelCatalog] = None
 _manager = None
 _idle_timer: Optional[threading.Timer] = None
 _auto_stop_timer: Optional[threading.Timer] = None
-_state_lock = threading.Lock()
+# RLock, not Lock: `_engine_manager()` calls `_catalog()` while already holding this lock, so a
+# plain non-reentrant Lock self-deadlocks the first time the direct-engine fallback runs (bugfix:
+# found while reviewing prism/acp.py's identical pattern, which correctly used an RLock from the
+# start; this file's fallback path was never exercised by a test that goes through the real
+# `_engine_manager()`, since `TestServerlessFallback` patches `mcp._manager` directly).
+_state_lock = threading.RLock()
 
 
 def _catalog() -> ModelCatalog:

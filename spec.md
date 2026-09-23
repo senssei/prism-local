@@ -341,7 +341,9 @@ Tests and reviews cite these by number. Changing one needs operator approval.
       worker thread resolves the still-pending `session/prompt` request with `result: {"stopReason": "cancelled"}` instead
       of `"end_turn"`. If generation had already finished naturally in the race, the `"end_turn"` response — sent first —
       wins, and a `session/cancel` that arrives after is a silent no-op (idempotent; ACP does not require an
-      acknowledgement for `session/cancel`, it is a notification).
+      acknowledgement for `session/cancel`, it is a notification). A cancel that arrives before any content has been
+      generated still appends `{"role": "assistant", "content": ""}` to `session.messages` (rather than nothing at
+      all) — an empty turn, not a missing one, so strict user/assistant alternation (I7) holds for the next prompt.
     - **Errors** (backend unavailable, resource limits, template render failure, context length exceeded — the same
       failure modes `docs/api.md` Errors table lists for `/v1/chat/completions`) resolve the `session/prompt` request with
       a JSON-RPC error object, `code: -32000`, `message` naming the underlying Prism error (HTTP status code and body, or
@@ -365,23 +367,42 @@ Tests and reviews cite these by number. Changing one needs operator approval.
   - **Unknown methods** (including `session/load`, any `fs/*` or `terminal/*` call arriving from a client that assumes
     Phase 13/14 capabilities Prism has not advertised) get MCP's existing pattern: `-32601 Method not found` when the
     request carries an `id`; a notification with no `id` and an unknown method is silently dropped.
-  - **Malformed-but-JSON-valid input never crashes the process.** `_dispatch` wraps its whole method-routing body in
-    `try/except`: a wrong-typed `params` (a list or string instead of an object), a `prompt` that is `null`, a string,
-    or a list of non-objects, or any other shape a handler does not expect raises `AttributeError` / `TypeError` /
-    `IndexError` / `KeyError` (the classes a malformed shape actually produces from `.get()`/iteration) and turns into a
-    JSON-RPC error response `code: -32602` on the request's `id`; any other, genuinely unexpected exception (e.g. an
-    `OSError` from a catalog/filesystem fault inside `_default_model()`) is a real internal fault, not a bad request,
-    and gets `code: -32603` instead — the two are not conflated. A request that is not even a JSON object, or a
-    notification with no `id`, is silently absorbed with no response. This applies to the synchronous handlers
-    (`initialize`, `session/new`, `session/cancel`, and the prompt-extraction half of `session/prompt` that runs before
-    its worker thread is spawned); the worker thread itself (`_run_prompt`) already has its own `try/except Exception`
-    (see the Errors bullet above), so a fault there was already isolated to that one `session/prompt` request.
+  - **Malformed-but-JSON-valid input never crashes the process, and is classified by an explicit contract, not by
+    exception type.** `AcpRequestError(code, message)` is raised only at points that have explicitly validated the
+    incoming shape: a non-dict `params` for any of the four methods, a `sessionId` that is not a string
+    (`_require_session_id`), or a `prompt` that is not a list of objects with a `"text"` type (`_extract_prompt_text`).
+    `_dispatch` catches `AcpRequestError` first and sends its carried `code` (always `-32602`) verbatim. A *second,
+    separate* `except Exception` catches everything else and always reports `-32603` — this is deliberately not the
+    same code path: an earlier revision classified by exception *type* (`AttributeError`/`TypeError`/`IndexError`/
+    `KeyError` → `-32602`, else `-32603`), which is unsound, because a genuine internal bug (e.g. a catalog entry whose
+    `device` field is `None` instead of a string) can raise the exact same `AttributeError` a malformed request raises,
+    and would have been mislabeled `-32602 Invalid params` for a perfectly well-formed request. A request that is not
+    even a JSON object, or a notification with no `id`, is silently absorbed with no response. This applies to the
+    synchronous handlers (`initialize`, `session/new`, `session/cancel`, and the prompt-extraction half of
+    `session/prompt` that runs before its worker thread is spawned); the worker thread itself (`_run_prompt`) already
+    has its own `try/except Exception` (see the Errors bullet above), so a fault there was already isolated to that one
+    `session/prompt` request.
+  - **A pathologically nested (but syntactically valid) JSON line must not crash the process either.** `json.loads` on
+    a deeply nested structure (thousands of nested `[`) raises `RecursionError`, not `json.JSONDecodeError` — a third
+    crash vector distinct from a malformed *shape* (caught by `_dispatch`, above) because it happens before `_dispatch`
+    is ever reached. `run_acp_server`'s per-line body (`_handle_line`) therefore wraps both `json.loads` and the
+    `_dispatch` call in one `try/except Exception`, logging and dropping the line instead of propagating.
   - **A broken stdout never crashes the process either.** `_write` (the single choke point every response and
     notification goes through) wraps its `sys.stdout.write`/`flush` in `try/except (BrokenPipeError, OSError,
     ValueError)`, logging to stderr and dropping the line instead of raising — mirrors `prism/server.py`'s `_safe_write`
     (spec P13). Without this, an editor that closed its end of the pipe (crashed, or tore the ACP session down) would
     take down `run_acp_server`'s stdin loop on the very next response — including the `-32602`/`-32603` error responses
-    `_dispatch`'s own catch-all sends, which would otherwise raise from inside that catch-all and propagate out uncaught.
+    `_dispatch`'s own catch-all sends, which would otherwise raise from inside that catch-all and propagate out
+    uncaught. The stderr log line itself is wrapped in its own `try/except Exception: pass` — if stderr is *also*
+    broken (both streams torn down together), there is nothing left to report to, but the write still must not raise.
+  - **The lazy `_catalog()`/`_engine_manager()` singletons are safe under concurrent daemon threads.** Both are guarded
+    by one module-level `threading.RLock` (`_state_lock`), not a plain `Lock`: `_engine_manager()` calls `_catalog()`
+    while already holding `_state_lock`, so a non-reentrant lock would self-deadlock the very first time it runs. Two
+    sessions can independently hit the direct-engine fallback on their own daemon threads at the same time (e.g. both
+    see `prism serve` unreachable); without the lock, both could pass the "is it `None`" check before either finished
+    constructing, producing two `ActiveEngineManager`s — i.e. two engine locks, defeating I2's "one resident model, one
+    lock" and reaching exactly the concurrent-model-load scenario `AGENTS.md` calls out as having hung the reference
+    Windows host.
   - **A late failure while reporting a result must not discard a completed answer.** `_run_prompt` tracks whether the
     assistant turn was actually appended to `session.messages` (a local `answered` flag) before deciding whether to pop
     the dangling user turn on an exception. Only `answered is False` pops — if the failure happens *after* the answer
