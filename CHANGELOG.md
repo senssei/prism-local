@@ -29,7 +29,10 @@ versions may include breaking changes).
   (wrong-typed `params`/`prompt`) returns a JSON-RPC error instead of crashing the stdio loop; a failed generation no
   longer leaves a dangling, unanswered user turn in the session history; `initialize`'s `protocolVersion` rejects
   booleans and negative numbers instead of echoing them back. `prism.catalog.DEFAULT_FALLBACK_MODEL_ID` centralizes the
-  hardcoded model id `prism mcp` and `prism acp` fall back to when no local models are installed at all.
+  hardcoded model id `prism mcp` and `prism acp` fall back to when no local models are installed at all. A broken stdout
+  pipe (the editor closed the connection) is logged and dropped instead of crashing the process; a late failure while
+  reporting a completed answer no longer discards that answer; an internal fault (e.g. a catalog I/O error) is reported
+  as `-32603 Internal error` instead of being mislabeled `-32602 Invalid params`.
 - Centralised env-var schema (`prism/env_config.py`, stdlib only): one frozen `EnvConfig` dataclass declaring every `PRISM_*` variable with its type, default, and `__post_init__` validator. `EnvConfig.from_env(...)` builds an instance from a Mapping; `EnvConfig.from_env_file(path)` parses a hand-rolled `KEY=VALUE` file (whitespace, `# comment`, double/single-quoted values); `load_config()` runs at CLI / server startup, fails fast on bad values (one `ValueError` listing every problem), and emits one `logging.warning` for any unknown `PRISM_*` key. No runtime dependency — no `kev`, no `pydantic-settings`, no `python-dotenv`. `.env` file loading is opt-in only: `PRISM_ENV_FILE=/path/to/.env` (security: never auto-discover a file the operator did not name).
 - Reasoning separation: `prism.reasoning` module extracting `<think>...</think>` blocks into `message.reasoning_content` (and streaming `delta.reasoning_content`) for OpenAI-compatible `/v1/chat/completions` across ONNX and Ollama backends, while keeping raw output intact for legacy `/v1/completions`.
 - Thread control: `PRISM_THREADS` environment variable to set intra-op thread count via session_options overlay on ONNX models.

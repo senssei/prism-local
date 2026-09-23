@@ -365,15 +365,29 @@ Tests and reviews cite these by number. Changing one needs operator approval.
   - **Unknown methods** (including `session/load`, any `fs/*` or `terminal/*` call arriving from a client that assumes
     Phase 13/14 capabilities Prism has not advertised) get MCP's existing pattern: `-32601 Method not found` when the
     request carries an `id`; a notification with no `id` and an unknown method is silently dropped.
-  - **Malformed-but-JSON-valid input never crashes the process.** `_dispatch` wraps its whole method-routing body in a
-    single `try/except Exception`: a wrong-typed `params` (a list or string instead of an object), a `prompt` that is
-    `null`, a string, or a list of non-objects, or any other shape a handler does not expect turns into a JSON-RPC error
-    response (`code: -32602`) on the request's `id` — or, for a request that is not even a JSON object, or a notification
-    with no `id`, is silently absorbed with no response — instead of an unhandled exception escaping the `for line in
-    sys.stdin:` loop and killing every session the editor has open. This applies to the synchronous handlers
+  - **Malformed-but-JSON-valid input never crashes the process.** `_dispatch` wraps its whole method-routing body in
+    `try/except`: a wrong-typed `params` (a list or string instead of an object), a `prompt` that is `null`, a string,
+    or a list of non-objects, or any other shape a handler does not expect raises `AttributeError` / `TypeError` /
+    `IndexError` / `KeyError` (the classes a malformed shape actually produces from `.get()`/iteration) and turns into a
+    JSON-RPC error response `code: -32602` on the request's `id`; any other, genuinely unexpected exception (e.g. an
+    `OSError` from a catalog/filesystem fault inside `_default_model()`) is a real internal fault, not a bad request,
+    and gets `code: -32603` instead — the two are not conflated. A request that is not even a JSON object, or a
+    notification with no `id`, is silently absorbed with no response. This applies to the synchronous handlers
     (`initialize`, `session/new`, `session/cancel`, and the prompt-extraction half of `session/prompt` that runs before
     its worker thread is spawned); the worker thread itself (`_run_prompt`) already has its own `try/except Exception`
     (see the Errors bullet above), so a fault there was already isolated to that one `session/prompt` request.
+  - **A broken stdout never crashes the process either.** `_write` (the single choke point every response and
+    notification goes through) wraps its `sys.stdout.write`/`flush` in `try/except (BrokenPipeError, OSError,
+    ValueError)`, logging to stderr and dropping the line instead of raising — mirrors `prism/server.py`'s `_safe_write`
+    (spec P13). Without this, an editor that closed its end of the pipe (crashed, or tore the ACP session down) would
+    take down `run_acp_server`'s stdin loop on the very next response — including the `-32602`/`-32603` error responses
+    `_dispatch`'s own catch-all sends, which would otherwise raise from inside that catch-all and propagate out uncaught.
+  - **A late failure while reporting a result must not discard a completed answer.** `_run_prompt` tracks whether the
+    assistant turn was actually appended to `session.messages` (a local `answered` flag) before deciding whether to pop
+    the dangling user turn on an exception. Only `answered is False` pops — if the failure happens *after* the answer
+    was appended (e.g. `_send_result` itself raising), the completed answer stays in history and only the response to
+    the client is lost, rather than silently discarding the model's actual answer and leaving the same one dangling
+    unanswered user turn the pop was introduced to prevent, just via a different trigger.
   - **`prism connect acp`**: mirrors `prism connect mcp --target ...` — prints (and with `--write`, merges into) a Zed
     `settings.json` `agent_servers` entry pointing at `prism acp` (no network config needed; ACP is stdio-launched by the
     editor, like MCP). `docs/integrations.md` gets an "ACP (Zed)" section next to "MCP server" documenting the table of

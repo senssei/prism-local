@@ -290,6 +290,65 @@ class TestEmptyCatalogDefaultModel(AcpTestCase):
         self.assertEqual(acp._sessions[session_id].model, DEFAULT_FALLBACK_MODEL_ID)
 
 
+class TestStdoutWriteFailure(AcpTestCase):
+    """Second-review finding #1: a broken stdout pipe must not kill the stdio loop."""
+
+    def test_broken_pipe_while_sending_an_error_does_not_raise(self):
+        with patch.object(acp.sys.stdout, "write", side_effect=BrokenPipeError("broken")):
+            acp._dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["x"]})
+
+    def test_broken_pipe_while_sending_a_normal_response_does_not_raise(self):
+        with patch.object(acp.sys.stdout, "write", side_effect=BrokenPipeError("broken")):
+            acp._dispatch({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}})
+
+
+class TestCompletedAnswerSurvivesLateFailure(AcpTestCase):
+    """Second-review finding #2: don't pop the assistant turn once it was actually appended."""
+
+    def test_send_result_failure_after_a_completed_answer_does_not_discard_it(self):
+        def source(*_a, **_k):
+            return iter([{"content": "done"}])
+
+        def flaky_send_result(_req_id, _result):
+            raise RuntimeError("stdout gone")
+
+        with patch("prism.acp._server_delta_stream", side_effect=source), \
+             patch("prism.acp._send_result", side_effect=flaky_send_result), \
+             patch("prism.acp._write"):
+            session_id = self._new_session()
+            thread = acp.handle_session_prompt(
+                {"sessionId": session_id, "prompt": [{"type": "text", "text": "hi"}]}, 1)
+            thread.join(2.0)
+
+        self.assertEqual(
+            acp._sessions[session_id].messages,
+            [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "done"}],
+        )
+
+
+class TestErrorCodeLabeling(AcpTestCase):
+    """Second-review finding #3: an internal fault must not be mislabeled as a bad request."""
+
+    def test_internal_fault_in_session_new_is_labeled_internal_error(self):
+        class BrokenCatalog:
+            def list_all_models(self, include_ollama=True):
+                raise OSError("disk gone")
+
+        captured = []
+        with patch("prism.acp._catalog", return_value=BrokenCatalog()), \
+             patch("prism.acp._write", side_effect=captured.append):
+            acp._dispatch({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {"cwd": "/tmp"}})
+        response = next(m for m in captured if m.get("id") == 1)
+        self.assertEqual(response["error"]["code"], -32603)
+
+    def test_malformed_params_is_still_labeled_invalid_params(self):
+        captured = []
+        with patch("prism.acp._write", side_effect=captured.append):
+            acp._dispatch({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": ["x"]})
+        response = next(m for m in captured if m.get("id") == 2)
+        self.assertEqual(response["error"]["code"], -32602)
+
+
 class TestDirectEngineFallback(unittest.TestCase):
     """With `prism serve` unreachable, `session/prompt` runs the model in this process (mirrors `mcp.py`)."""
 

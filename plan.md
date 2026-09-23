@@ -246,7 +246,23 @@ since ACP's `session/cancel` carries no turn-correlation id and a real fix would
 control — only reachable if the client itself sends a new `session/prompt` before receiving the previous one's
 `stopReason`. Gate green after fixes (474 tests); fixes verified by tests, not re-reviewed by a second fresh subagent.
 Phase 13 (fs-mediated tool calls) and Phase 14 (terminal execution) remain in the Phase 3 backlog, gated by `intent.md`
-non-goal §4.5, to be promoted one at a time. Awaiting operator decision to commit. `intent.md` §2
+non-goal §4.5, to be promoted one at a time. Awaiting operator decision to commit.
+
+**Review round 2** (fresh subagent, verifying round 1's fixes and doing a new full pass): confirmed (1), (4), (5) fixed
+and (2) correctly documented as an accepted trade-off, but found (3) only partially fixed plus 2 new issues introduced by
+round 1's own fixes: (new-1, high) `_write` had no protection against a broken stdout pipe, so an I/O failure while
+sending *any* response — including the `-32602`/`-32603` error responses `_dispatch`'s own catch-all sends — would
+propagate out of `_dispatch` uncaught and kill the whole stdio loop, reintroducing the exact crash class finding (1)
+fixed, just via pipe failure instead of malformed JSON; (new-2, medium-high) the round-1 "pop the dangling user turn on
+any exception" fix could pop the *assistant* turn instead if the failure happened after a successful generation (e.g.
+`_send_result` itself raising), silently discarding a completed answer; (new-3, medium) `_dispatch`'s blanket
+`except Exception` mislabeled genuine internal faults (e.g. a catalog I/O error in `_default_model()`) as
+`-32602 Invalid params`. All three fixed test-first (5 new tests, all proven red against the round-1 code via
+`git stash` before the round-2 fix): `_write` now swallows `(BrokenPipeError, OSError, ValueError)` and logs to stderr
+(mirrors `prism/server.py`'s `_safe_write`, spec P13); `_run_prompt` tracks an `answered` flag and only pops when the
+assistant turn was never appended; `_dispatch` now distinguishes `(AttributeError, TypeError, IndexError, KeyError)` →
+`-32602` from any other exception → `-32603`. Gate green after round-2 fixes (479 tests). Fixes verified by tests only —
+not re-reviewed by a third independent pass; the operator can request one if more assurance is wanted before shipping. `intent.md` §2
 (outcome), §3.7 (constraint) and §4.5 (non-goal) approved 2026-09-23. This phase is deliberately narrow: a working `prism acp` an ACP-capable editor (Zed) can hold a plain-text
 streamed conversation with, and cancel — no file or command access yet (that is Phase 13/14, listed under Phase 3
 backlog, gated by non-goal §4.5). No invariant changes; stdlib-only (hand-rolled JSON-RPC over stdio, one

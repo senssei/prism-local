@@ -74,10 +74,17 @@ def _auth_headers(headers: Dict[str, str]) -> Dict[str, str]:
 
 
 def _write(obj: Dict[str, Any]) -> None:
+    """Writes one JSON-RPC line. A broken stdout (the editor closed the pipe) is logged and
+    swallowed rather than raised: raising here would escape every caller — including the error
+    handler in `_dispatch` and the `finally` cleanup in `_run_prompt` — and kill the whole stdio
+    loop over a peer that is simply gone (mirrors `prism/server.py`'s `_safe_write`, spec P13)."""
     line = json.dumps(obj)
     with _stdout_lock:
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+        try:
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError, ValueError) as ex:
+            sys.stderr.write(f"prism acp: dropped a response, stdout is gone ({ex}).\n")
 
 
 def _send_result(req_id: Any, result: Dict[str, Any]) -> None:
@@ -208,6 +215,7 @@ def handle_session_prompt(params: Dict[str, Any], req_id: Any) -> Optional[threa
 
 def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
     session.messages.append({"role": "user", "content": prompt_text})
+    answered = False
     try:
         try:
             deltas = _server_delta_stream(session.messages, session.model)
@@ -240,13 +248,20 @@ def _run_prompt(session: "_Session", prompt_text: str, req_id: Any) -> None:
                     },
                 })
         session.messages.append({"role": "assistant", "content": "".join(answer)})
+        answered = True
         _send_result(req_id, {"stopReason": stop_reason})
     except urllib.error.HTTPError as ex:
-        session.messages.pop()  # drop the unanswered user turn so the next prompt starts clean
+        # Only drop the dangling user turn if the assistant never got a chance to answer it —
+        # once `answered` is True the failure happened while reporting a real result (e.g. the
+        # send itself failed), and popping would silently discard a completed answer instead
+        # (review finding: a naive "always pop" reintroduces the exact bug it was meant to fix).
+        if not answered:
+            session.messages.pop()
         detail = ex.read().decode("utf-8", "replace")[:500]
         _send_error(req_id, -32000, f"Prism server responded {ex.code}: {detail}")
     except Exception as ex:
-        session.messages.pop()  # drop the unanswered user turn so the next prompt starts clean
+        if not answered:
+            session.messages.pop()
         _send_error(req_id, -32000, str(ex))
     finally:
         session.busy = False
@@ -284,9 +299,16 @@ def _dispatch(req: Dict[str, Any]) -> None:
         else:
             if req_id is not None:
                 _send_error(req_id, -32601, f"Method not found: {method}")
-    except Exception as ex:
+    except (AttributeError, TypeError, IndexError, KeyError) as ex:
+        # The shape of `params`/`prompt` was wrong (e.g. `.get` on a list, iterating `None`) —
+        # this is the class of exception a malformed-but-JSON-valid message actually raises.
         if req_id is not None:
             _send_error(req_id, -32602, f"Invalid params: {ex}")
+    except Exception as ex:
+        # Anything else (e.g. a catalog/filesystem fault inside `_default_model`) is a genuine
+        # internal fault, not a bad request — don't mislabel it as "Invalid params" (review finding).
+        if req_id is not None:
+            _send_error(req_id, -32603, f"Internal error: {ex}")
 
 
 def run_acp_server() -> None:
