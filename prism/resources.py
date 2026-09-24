@@ -3,6 +3,7 @@ prism.resources: RAM and VRAM Resource Budget and Capacity Guard.
 Enforces memory limits prior to loading models to prevent system thrashing or host crashes.
 """
 
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -182,6 +183,28 @@ def vram_free_mb(device_index: int = 0) -> Optional[float]:
     if 0 <= device_index < len(devices):
         return float(devices[device_index].get("vram_free_mb", 0.0))
     return None
+
+
+def low_vram_threshold_mb() -> float:
+    """Returns the per-device free-VRAM threshold in MiB below which a diagnostic warning is warranted.
+
+    Reads `$PRISM_VRAM_RESERVE_MB` (the same reserve `check_can_load` uses to refuse a load).
+    Default `DEFAULT_VRAM_RESERVE_MB` (1536.0). Empty, non-numeric, or non-finite values
+    (`inf`, `-inf`, `nan`) fall back to the default — matching `check_can_load`'s tolerant
+    handling at the call site below AND ensuring the diagnostic site in `prism doctor`
+    can never crash or silently disable the warning (spec P17: "Failure modes: none.
+    `prism doctor` exits 0 regardless of VRAM state").
+    """
+    raw = os.environ.get("PRISM_VRAM_RESERVE_MB", "").strip()
+    if not raw:
+        return DEFAULT_VRAM_RESERVE_MB
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_VRAM_RESERVE_MB
+    if not math.isfinite(value):
+        return DEFAULT_VRAM_RESERVE_MB
+    return value
 
 
 def estimate_load_mb(model_path: Union[str, Path], prefill_chunk: Optional[int] = None) -> float:

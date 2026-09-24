@@ -66,7 +66,7 @@ actually loads**, and whether Ollama is reachable. Fix anything marked ❌ befor
 | `PRISM_QUEUE_TIMEOUT` | Seconds a request may wait for the model before `503` (`0` = forever); same as `prism serve --queue-timeout` | `300` |
 | `PRISM_MAX_QUEUE` | Maximum requests allowed to wait for the engine before immediate `503 server_busy` (`0` = unlimited); same as `prism serve --max-queue` | `8` |
 | `PRISM_RAM_RESERVE_MB` | Host RAM in MB kept free when checking if a model can safely load | `2048` |
-| `PRISM_VRAM_RESERVE_MB` | GPU VRAM in MB kept free when checking if a CUDA model can safely load | `1536` |
+| `PRISM_VRAM_RESERVE_MB` | GPU VRAM in MB kept free when checking if a CUDA model can safely load. If free VRAM falls below this reserve, `prism doctor` emits a `prism.cli` `WARNING` naming the device and the next step (`POST /v1/unload`); see `docs/cli.md` | `1536` |
 | `PRISM_RESOURCE_CHECK` | `off` or `0` disables the pre-load RAM and VRAM capacity guard | on |
 | `PRISM_LOAD_LOCK` | `off` or `0` disables cross-process model load serialization (`load.lock`) | on |
 | `PRISM_LOAD_TIMEOUT` | Seconds a process waits for the cross-process model load lock before failing | `120` |

@@ -1,5 +1,6 @@
 import contextlib
 import io
+import logging
 import os
 import shutil
 import sys
@@ -219,6 +220,153 @@ class TestDoctorWslconfig(unittest.TestCase):
         code, out = run_cli("doctor", env={"PRISM_FORCE_WSL": "0", "PRISM_WSLCONFIG_PATH": ""})
         self.assertEqual(code, 0)
         self.assertNotIn("WSL configuration", out)
+
+
+class TestDoctorVram(unittest.TestCase):
+    """Phase 14: per-device VRAM display in `prism doctor` + low-VRAM warning (spec P17)."""
+
+    def _gpu_payload(self, devices):
+        return {
+            "available": True,
+            "driver_path": "/dev/nvidia0",
+            "devices": devices,
+        }
+
+    def _fake_device(self, **overrides):
+        dev = {
+            "index": 0,
+            "name": "Fake RTX 5070",
+            "compute_capability": "12.0",
+            "qualifying_cuda": True,
+            "vram_total_mb": 12288.0,
+            "vram_used_mb": 2048.0,
+            "vram_free_mb": 10240.0,
+        }
+        dev.update(overrides)
+        return dev
+
+    def test_doctor_prints_per_device_vram_when_nvml_available(self):
+        """Primary display test: `prism doctor` prints the per-device VRAM line."""
+        device = self._fake_device()
+        with patch("prism.cli.get_gpu_info", return_value=self._gpu_payload([device])):
+            code, out = run_cli("doctor")
+        self.assertEqual(code, 0)
+        # The existing `cmd_status` line format, mirrored here.
+        self.assertIn("VRAM: 2048.0 MB used / 12288.0 MB total (10240.0 MB free)", out)
+        # 10240 MB free > 1536 MB default reserve -> no warning.
+        with patch("prism.cli.get_gpu_info", return_value=self._gpu_payload([device])):
+            with self.assertNoLogs("prism.cli", level="WARNING"):
+                run_cli("doctor")
+
+    def test_doctor_warns_when_free_vram_below_reserve(self):
+        """Primary warning test: low free VRAM emits exactly one `prism.cli` WARNING."""
+        device = self._fake_device(vram_used_mb=11788.0, vram_free_mb=500.0)
+        with patch("prism.cli.get_gpu_info", return_value=self._gpu_payload([device])):
+            with self.assertLogs("prism.cli", level="WARNING") as cm:
+                code, out = run_cli("doctor", env={"PRISM_VRAM_RESERVE_MB": "1536"})
+        self.assertEqual(code, 0)
+        joined = "\n".join(cm.output)
+        self.assertIn("GPU #0", joined)
+        self.assertIn("500.0", joined)
+        self.assertIn("1536", joined)
+        self.assertIn("unload", joined)
+        # Exactly one warning record for this single-device scenario.
+        warning_records = [r for r in cm.records if r.levelno >= logging.WARNING]
+        self.assertEqual(len(warning_records), 1)
+
+    def test_doctor_does_not_warn_when_nvml_unavailable(self):
+        """NVML unavailable: keep the existing error branch and emit no warning."""
+        with patch("prism.cli.get_gpu_info",
+                   return_value={"available": False, "devices": [], "error": "NVML: driver not loaded"}):
+            with self.assertNoLogs("prism.cli", level="WARNING"):
+                code, out = run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("❌ GPU:", out)
+        self.assertIn("NVML: driver not loaded", out)
+
+    def test_doctor_with_two_devices_warns_only_on_low_one(self):
+        """Multi-GPU: warning is per-device; only the low one is named."""
+        low = self._fake_device(index=0, vram_used_mb=11788.0, vram_free_mb=500.0)
+        fine = self._fake_device(index=1, vram_used_mb=2048.0, vram_free_mb=10240.0)
+        with patch("prism.cli.get_gpu_info", return_value=self._gpu_payload([low, fine])):
+            with self.assertLogs("prism.cli", level="WARNING") as cm:
+                code, out = run_cli("doctor", env={"PRISM_VRAM_RESERVE_MB": "1536"})
+        self.assertEqual(code, 0)
+        joined = "\n".join(cm.output)
+        self.assertIn("GPU #0", joined)
+        self.assertNotIn("GPU #1", joined)
+        # Both VRAM lines still printed.
+        self.assertIn("500.0 MB free", out)
+        self.assertIn("10240.0 MB free", out)
+
+    def test_doctor_warning_threshold_respects_PRISM_VRAM_RESERVE_MB(self):
+        """The threshold is read from the env, not hard-coded to 1536.
+
+        With vram_free=500.0:
+          - PRISM_VRAM_RESERVE_MB=200  -> 500 >= 200 -> no warning.
+          - PRISM_VRAM_RESERVE_MB=1000 -> 500 < 1000 -> warning.
+        """
+        device = self._fake_device(vram_used_mb=11788.0, vram_free_mb=500.0)
+        with patch("prism.cli.get_gpu_info", return_value=self._gpu_payload([device])):
+            with self.assertNoLogs("prism.cli", level="WARNING"):
+                run_cli("doctor", env={"PRISM_VRAM_RESERVE_MB": "200"})
+        with patch("prism.cli.get_gpu_info", return_value=self._gpu_payload([device])):
+            with self.assertLogs("prism.cli", level="WARNING") as cm:
+                run_cli("doctor", env={"PRISM_VRAM_RESERVE_MB": "1000"})
+        joined = "\n".join(cm.output)
+        self.assertIn("1000", joined)
+
+    def test_doctor_does_not_crash_when_PRISM_VRAM_RESERVE_MB_is_inf(self):
+        """Spec P17 says `prism doctor` exits 0 regardless of VRAM state; non-finite
+        thresholds (inf / -inf / nan) must fall back to the default — they must never
+        raise out of `cmd_doctor`.
+
+        Reproduces review Finding 1.
+        """
+        device = self._fake_device(vram_used_mb=2048.0, vram_free_mb=10240.0)
+        for bad in ("inf", "-inf", "nan"):
+            with self.subTest(value=bad):
+                with patch("prism.cli.get_gpu_info", return_value=self._gpu_payload([device])):
+                    with self.assertNoLogs("prism.cli", level="WARNING"):
+                        # 10240 MB free > 1536 default fallback -> no warning, no crash.
+                        code, _ = run_cli("doctor", env={"PRISM_VRAM_RESERVE_MB": bad})
+                self.assertEqual(code, 0, msg=f"non-finite {bad} should not crash the doctor")
+
+    def test_doctor_warning_message_reports_full_threshold_precision(self):
+        """Review Finding 2: the warning message must show the threshold the operator
+        actually set, not a truncated integer. With `PRISM_VRAM_RESERVE_MB=1536.7` and
+        `vram_free_mb=1536.5`, the warning fires (1536.5 < 1536.7) and the message
+        contains the full `1536.7` (matching the `%.1f` convention used for vram_*).
+        """
+        device = self._fake_device(vram_used_mb=10751.5, vram_free_mb=1536.5)
+        with patch("prism.cli.get_gpu_info", return_value=self._gpu_payload([device])):
+            with self.assertLogs("prism.cli", level="WARNING") as cm:
+                code, _ = run_cli("doctor", env={"PRISM_VRAM_RESERVE_MB": "1536.7"})
+        self.assertEqual(code, 0)
+        joined = "\n".join(cm.output)
+        self.assertIn("1536.7", joined)
+        # And the live numbers keep the existing 1-decimal convention.
+        self.assertIn("1536.5", joined)
+
+    def test_doctor_nvml_unavailable_branch_matches_cmd_status(self):
+        """Review Finding 3: the new `❌ GPU:` line in cmd_doctor mirrors cmd_status
+        exactly (same fallback expression) so future divergence is caught here.
+
+        With `error: None`: both subcommands must produce the same `❌ GPU:` line.
+        cmd_status uses `gpu.get('error', 'Not detected via NVML')` and cmd_doctor
+        must use the same expression — not the equivalent `or`-style, which falls
+        back differently for explicit `None` or empty-string `error`.
+        """
+        fixture = {"available": False, "devices": [], "error": None}
+        # Both subcommands must print the same `❌ GPU: ...` line.
+        with patch("prism.cli.get_gpu_info", return_value=fixture):
+            _, doctor_out = run_cli("doctor")
+        with patch("prism.cli.get_gpu_info", return_value=fixture):
+            _, status_out = run_cli("status")
+        doctor_line = [ln for ln in doctor_out.splitlines() if ln.startswith("❌ GPU:")][-1]
+        status_line = [ln for ln in status_out.splitlines() if ln.startswith("❌ GPU:")][-1]
+        self.assertEqual(doctor_line, status_line,
+                         "cmd_doctor's ❌ GPU: fallback must mirror cmd_status exactly")
 
 
 if __name__ == "__main__":

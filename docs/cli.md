@@ -30,6 +30,11 @@ discovered ONNX models.
 Checks the NVML driver, `onnxruntime-genai`, whether ONNX Runtime's **CUDA provider can be loaded** (naming the missing
 library if not), the Ollama daemon, model conversion dependencies, and WSL2 host `.wslconfig` memory limits.
 
+- Per-device VRAM usage (used / total / free in MiB).
+- If free VRAM on any device is below `$PRISM_VRAM_RESERVE_MB` (default 1536), `prism doctor` also
+  emits a `logging.getLogger("prism.cli")` warning naming the device and the next step
+  (`POST /v1/unload`).
+
 ## `prism list`
 
 Lists ONNX models (from the [search paths](getting-started.md#configuration)) and installed Ollama models with engine, size and

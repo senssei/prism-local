@@ -6,6 +6,14 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+- `prism doctor` now reports per-device VRAM usage (`used / total / free` in MiB) and emits a
+  `logging.getLogger("prism.cli")` warning when free VRAM is below `$PRISM_VRAM_RESERVE_MB`
+  (default 1536). The warning names the device (e.g. `GPU #0`), the live `vram_used_mb /
+  vram_total_mb / vram_free_mb`, the configured threshold, and the next step (`POST /v1/unload`).
+  Threshold is read through the new `prism.resources.low_vram_threshold_mb()` helper, which mirrors
+  the env-read pattern the existing `check_can_load` guard already uses. No new env var, no new flag.
+
 ### Fixed
 - `prism acp`: fixed a `NameError` on `time` during request timeout/cancellation, forwarded structured SSE `tool_calls`
   emitted by `prism serve` to the ACP agent tool-execution loop, properly propagated turn cancellation during

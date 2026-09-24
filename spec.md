@@ -530,6 +530,17 @@ Tests and reviews cite these by number. Changing one needs operator approval.
   `session/update` `tool_call` / `tool_call_update` shapes, and the `session/request_permission` UX; `CHANGELOG.md [Unreleased]`
   gets a `### Added` entry for Phase 13; `tests/test_docs.py` enforces the docs link.
 
+### Phase 14: VRAM telemetry in `prism doctor` (`plan.md` Phase 14)
+
+- **P17 Per-device VRAM in `prism doctor`, low-VRAM warning**:
+  - **Display**: when `prism.telemetry.get_gpu_info()` reports `available: True`, `prism doctor` prints one line per device with VRAM used / total / free in MiB, matching the existing `prism status` line (`prism/cli.py` `cmd_status`). When NVML is missing or the GPU is not detected, the existing `❌ GPU: ...` branch is unchanged.
+  - **Warning**: when a device's `vram_free_mb` is below the configured threshold, `prism doctor` also emits exactly one `logging.getLogger("prism.cli").warning(...)` record per affected device, naming `GPU #N`, the live `vram_used_mb / vram_total_mb / vram_free_mb`, the threshold, and the next step ("release the resident ONNX model with `POST /v1/unload` to recover headroom").
+  - **Threshold**: a new helper `prism.resources.low_vram_threshold_mb()` reads `$PRISM_VRAM_RESERVE_MB` exactly like `prism.resources.check_can_load` does today (default `DEFAULT_VRAM_RESERVE_MB` = 1536.0; empty / non-numeric falls back to the default, matching the existing `os.environ.get(...)` pattern). No new env var, no new flag, no new dataclass field — the existing `EnvConfig.vram_reserve_mb` field (added by Phase 11) is the same surface, simply read through the same local helper.
+  - **Why**: `prism doctor` is the read-only "what is wrong with my setup" command (`intent.md` §5, "`prism doctor` names the cause when CUDA cannot be used"). It already surfaces the missing NVML driver, the missing `.wslconfig` memory limit, the missing CUDA libraries, and the missing Ollama daemon. Free VRAM below the safety reserve belongs in the same diagnostic surface — silently continuing without raising it is the kind of "quiet hardware fallback" `intent.md` §3.3 calls out.
+  - **Failure modes**: none. `prism doctor` exits 0 regardless of VRAM state; a low-VRAM device is a warning, not an error. The warning does not block any later `prism run` / `prism serve` / model load; the existing pre-load capacity check (`prism.resources.check_can_load`) is the only refusal path.
+  - **No invariant change** (I1–I9 hold). No new env var. No new HTTP endpoint. Stdlib-only.
+  - **Docs**: `docs/cli.md` "`prism doctor`" gains a bullet for the new per-device line and the low-VRAM warning; `CHANGELOG.md [Unreleased]` gets a `### Added` entry. `docs/api.md` is unaffected.
+
 ### Implemented (Phase 1: Parallel use must not exhaust the machine)
 
 - **P1 Resource budget** (`prism/resources.py`): before an ONNX model is loaded, `check_can_load(model_path, device)` compares free

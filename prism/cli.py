@@ -5,6 +5,7 @@ prism.cli: Main Command-Line Interface for prism.
 
 import argparse
 import json
+import logging
 import os
 import sys
 
@@ -16,11 +17,13 @@ from prism.env_config import EnvConfig, load_config
 from prism.server import default_max_queue, default_queue_timeout, start_server
 from prism.telemetry import get_gpu_info, bootstrap_cuda_env, probe_cuda_provider
 from prism.engine import ModelLoadError, OnnxGenAiEngine, OG_AVAILABLE
-from prism.resources import inspect_wslconfig, system_memory_info
+from prism.resources import inspect_wslconfig, low_vram_threshold_mb, system_memory_info
 from prism.templates import render_prompt
 from prism.ollama_bridge import is_ollama_running, stream_ollama_chat
 from prism.convert import missing_dependencies, convert_model
 from prism.connectors import connect_cursor, connect_cline, connect_mcp, connect_acp
+
+logger = logging.getLogger("prism.cli")
 
 
 def cmd_status(args):
@@ -61,8 +64,22 @@ def cmd_doctor(args):
     gpu = get_gpu_info()
     if gpu.get("available"):
         print(f"✅ NVML Driver: Connected ({gpu['driver_path']})")
+        threshold = low_vram_threshold_mb()
+        for dev in gpu.get("devices", []):
+            free = float(dev.get("vram_free_mb", 0.0))
+            used = float(dev.get("vram_used_mb", 0.0))
+            total = float(dev.get("vram_total_mb", 0.0))
+            print(f"   • VRAM: {used:.1f} MB used / {total:.1f} MB total ({free:.1f} MB free)")
+            if free < threshold:
+                logger.warning(
+                    "GPU #%d free VRAM %.1f MB is below the %.1f MB reserve "
+                    "(used %.1f MB of %.1f MB total); release the resident ONNX model "
+                    "with `POST /v1/unload` to recover headroom.",
+                    dev.get("index"), free, threshold, used, total,
+                )
     else:
         print(f"❌ NVML Driver: Missing or inaccessible ({gpu.get('error')})")
+        print(f"❌ GPU: {gpu.get('error', 'Not detected via NVML')}")
 
     if OG_AVAILABLE:
         print("✅ ONNX Runtime GenAI: Installed.")
