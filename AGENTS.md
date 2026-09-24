@@ -14,10 +14,30 @@ and WSL2. Python >= 3.10, package in `prism/`, tests in `tests/`, docs in `docs/
 python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev,docs]"   # setup
 PYTHONPATH=. python3 -m unittest discover -s tests                                    # tests (~300, ~20 s, no GPU/network)
 PYTHONPATH=. python3 -m unittest tests.test_prism_cli.TestX.test_y                    # one test
-python3 scripts/sdlc_check.py                                                         # the gate: compile, tests, changelog, docs
+python3 scripts/sdlc_check.py                                                         # the gate: compile, tests, changelog, docs, lint
 python3 scripts/sdlc_check.py --red tests.test_x.TestY.test_z                         # red-first: these new tests must FAIL now
 mkdocs build --strict                                                                 # docs, as CI runs it
+ruff check path/to/changed.py                                                         # lint; the gate flags only lines you changed
 ```
+
+## Python conventions
+
+Match the module you are editing; the code was never machine-formatted, so do not reformat files or restyle code you are not
+changing. Patterns and reasoning: skill `python-conventions`.
+
+- **Python 3.10 is the floor** (CI runs 3.10 to 3.12): no `tomllib`, `ExceptionGroup`/`except*`, `typing.Self`, `enum.StrEnum`,
+  `typing.override`. Import optional engines lazily and name the extra in the error.
+- **Types**: annotate public functions in the module's own spelling (`Optional[X]`, `List[X]`, `Dict[K, V]` from `typing`; no
+  `X | None` in a module that has none). Module docstring `prism.<name>: purpose`. Lines up to 120. `pathlib` in new code.
+- **Errors**: no bare `except:`; `except Exception` only at a boundary that must not die, and it logs; never `pass`. Chain with
+  `raise ... from exc`.
+- **Logging**: `logger = logging.getLogger("prism.<module>")`. `print` only for CLI output the user asked for. In `prism acp` and
+  `prism mcp` stdout is the JSON-RPC stream: write only frames, through the module's locked writer.
+- **Locks**: a lock that a code path can re-enter is an `RLock` (`prism/acp.py`, `prism/mcp.py`, commit `238c3ff`).
+- **Security**: no `shell=True`, `eval`, `exec`, `pickle`; `subprocess` takes an argument list; check client-supplied paths against
+  the allowed root.
+- **Lint**: run `ruff check` on the files you changed before you say you are done. `scripts/sdlc_check.py --only lint` reports only
+  violations on changed lines; never bulk-apply `ruff format` or `--fix`. The Claude Code edit hook runs the same check.
 
 ## Development process (AI-native SDLC)
 
@@ -35,6 +55,7 @@ its artifact exists on disk, so the work survives `/clear`, context compaction a
 
 Each stage has a skill in `.agents/skills/` (`.claude/skills` is a symlink to it): `sdlc` (find the stage), `sdlc-plan` (1 to 3),
 `sdlc-implement` (4 and 5), `sdlc-review` (6), `sdlc-release` (ship). Every harness that reads skills gets the same workflow.
+`python-conventions` is the reference for writing Python here.
 
 ### Process rules
 

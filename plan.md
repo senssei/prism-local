@@ -594,3 +594,26 @@ of a synchronous stdio loop plus daemon timers).
 
 > **Risk register.** (1) **Logger noise.** A doctor run on a workstation with chronically low VRAM will log a warning every invocation. That is the intent — the warning is a deliberate signal in CI logs and on operator terminals — but document it next to the env var row in `docs/getting-started.md` so the no-surprise rule holds. (2) **`logging` propagation.** The existing CLI uses `print(...)` only; today the project has no `logging.getLogger("prism.cli")` configuration. The emitted records will propagate to the root logger and, if the user has `PYTHONLOGGING` configured, show in stderr. That is the documented convention for `prism.mcp` and `prism.acp` already (Phase 6, Phase 12) — adopting it here is consistent. (3) **Multi-GPU.** An operator with two GPUs can have device 0 fine and device 1 below the threshold. The warning names the offending device so the operator can act on it; it does not aggregate across devices. Documented behaviour, not a defect.
 
+
+---
+
+## Phase 15: Python agent configuration (ruff, Claude Code settings, conventions, skill)
+
+> Spec: `spec.md` §5 (Lint, Lint hook). Operator approved the plan in the session of 2026-09-24: ruff plus Claude Code settings plus a
+> `## Python conventions` section in `AGENTS.md` plus a `python-conventions` skill; lint enforced on changed code only, no mass
+> reformat. **Refinement of that approval:** "changed code" is the *changed lines*, not the changed files, because the baseline is 126
+> violations in 30 files (21 in `prism/server.py`) and a per-file gate would make every edit pay for old code. No `prism/` runtime
+> change, so no `CHANGELOG.md` entry. Phase 3's backlog row "Phase 14: `terminal/*`" now renumbers to Phase 16.
+
+- [ ] 15.1 `spec.md` §5 (Lint, Lint hook, CI wording) and this phase.
+- [ ] 15.2 Tests first (red): `tests/test_sdlc_check.py::TestLint` (skip without ruff; pass with no `.py` change; fail on a changed line;
+  pass on an untouched line of a changed file; untracked file is fully checked; deleted files are not passed to ruff; ruff exit 2 fails;
+  `lint` is in `CHECKS`) and `TestLintHook` (non-Python file, outside repo, invalid JSON, ruff missing all exit 0; a finding exits 2
+  with the report on stderr).
+- [ ] 15.3 `scripts/sdlc_check.py`: `changed_line_ranges`, `_ruff_cmd`, `check_lint`, `lint` in `CHECKS`. `pyproject.toml`: `ruff` in
+  the `dev` extra and `[tool.ruff]` (py310, line length 120, rule set chosen from the measured baseline). `.editorconfig`.
+- [ ] 15.4 `scripts/lint_hook.py` and `.claude/settings.json` (permissions allow/deny, `PostToolUse` hook); `.claude/settings.local.json`
+  in `.gitignore`.
+- [ ] 15.5 `.github/workflows/ci.yml` job `lint` (pull requests); `AGENTS.md` (`ruff` in Commands, `## Python conventions`, skill row);
+  `.agents/skills/python-conventions/SKILL.md`; `docs/development.md`, `docs/sdlc.md`.
+- [ ] 15.6 Independent review (`sdlc-review`, fresh subagent), findings closed test-first, `REVIEW.md` updated.

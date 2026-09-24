@@ -563,13 +563,27 @@ Tests and reviews cite these by number. Changing one needs operator approval.
 
 ## 5. Development tooling contract
 
-- **Gate** `python3 scripts/sdlc_check.py [--only compile|tests|changelog|docs ...] [--base REF]`: `compile` byte-compiles `prism`,
+- **Gate** `python3 scripts/sdlc_check.py [--only compile|tests|changelog|docs|lint ...] [--base REF]`: `compile` byte-compiles `prism`,
   `foundry_wsl`, `tests`, `scripts`; `tests` runs the unit suite; `changelog` requires `CHANGELOG.md` to change when runtime code
   (`prism/`, `foundry_wsl/`) changed against `--base` (default `main`); `docs` runs `mkdocs build --strict` and is skipped when
-  MkDocs is not installed. Exit `0` unless a check failed. `changed_files` returns paths verbatim (NUL-separated).
+  MkDocs is not installed; `lint` is described below. Exit `0` unless a check failed. `changed_files` returns paths verbatim
+  (NUL-separated).
+- **Lint** (`lint` check, ruff, configured in `pyproject.toml` `[tool.ruff]`): runs `ruff check --force-exclude` on the changed
+  `.py` files that still exist and reports only the violations that touch a **changed line** (a hunk of `git diff -U0` against the
+  merge-base with `--base`; every line of an untracked file). Violations in code the change did not touch never fail the gate, so the
+  unformatted history is not a debt the next author pays. `pass` when nothing is reported or no Python file changed; `skip` when
+  ruff is not installed (looked up as `ruff` on `PATH`, then `.venv/bin/ruff`, then `python -m ruff`) or git cannot diff against
+  `--base`; `fail` on a violation on a changed line (one `path:line:col CODE message` per line) or when ruff itself errors (exit
+  `2`, its stderr is the detail). The check never modifies a file (no `--fix`, no `ruff format`). It is not part of
+  `.githooks/pre-commit`; CI runs it on pull requests.
+- **Lint hook** `scripts/lint_hook.py`, wired as the Claude Code `PostToolUse` hook for `Edit|Write|MultiEdit` in
+  `.claude/settings.json`: reads the hook JSON from stdin, and for a `tool_input.file_path` that is an existing `.py` file inside
+  the repository runs the same check restricted to that file. Exit `2` with the report on stderr when it fails, so the agent sees it;
+  exit `0` for everything else (not a Python file, outside the repository, nothing to report, ruff missing, invalid JSON). A hook
+  must never block an edit for a reason that is not a lint finding.
 - **Red-first** `python3 scripts/sdlc_check.py --red TEST_ID...`: exit `0` only if every named test fails or errors now. A passing,
   skipped, `expectedFailure`, timed-out (60 s) or non-existent id is not red. It prints the exception line of each failure, swallows
   test output, and cannot be combined with `--only` / `--base`.
 - **Pre-commit hook** `.githooks/pre-commit` (opt-in: `git config core.hooksPath .githooks`) runs `compile`, `tests` and `changelog`
   from the repository root and blocks the commit when one fails.
-- **CI** runs the changelog check on every pull request in addition to tests, packaging and docs.
+- **CI** runs the changelog and lint checks on every pull request in addition to tests, packaging and docs.

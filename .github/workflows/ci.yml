@@ -44,6 +44,21 @@ jobs:
       - name: Runtime changes need a CHANGELOG.md entry
         run: python scripts/sdlc_check.py --only changelog --base "origin/${{ github.base_ref }}"
 
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the check diffs against the merge-base with the target branch
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: ruff on the lines this pull request changed
+        run: |
+          python -m pip install "ruff>=0.6"
+          python scripts/sdlc_check.py --only lint --base "origin/${{ github.base_ref }}"
+
   package:
     runs-on: ubuntu-latest
     steps:

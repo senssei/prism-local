@@ -3,6 +3,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -10,8 +11,8 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "sdlc_check.py"
 spec = importlib.util.spec_from_file_location("sdlc_check", SCRIPT)
@@ -224,6 +225,222 @@ class TestHook(unittest.TestCase):
         args, cwd = (self.repo / "scripts" / "args.txt").read_text().split("|")
         self.assertEqual(args, "--only compile --only tests --only changelog")
         self.assertEqual(Path(cwd).resolve(), self.repo.resolve())
+
+
+FAKE_RUFF = textwrap.dedent(
+    """
+    import json, os, sys
+    args = sys.argv[1:]
+    with open(os.environ["FAKE_RUFF_LOG"], "a") as f:
+        f.write(json.dumps(args) + "\\n")
+    if os.environ.get("FAKE_RUFF_EXIT") == "2":
+        sys.stderr.write("ruff: invalid config")
+        sys.exit(2)
+    rows = [int(r) for r in os.environ.get("FAKE_RUFF_ROWS", "").split(",") if r]
+    out = [
+        {"code": "F401", "message": "`os` imported but unused", "filename": os.path.abspath(f),
+         "location": {"row": r, "column": 1}, "end_location": {"row": r, "column": 10}}
+        for f in args if f.endswith(".py") for r in rows
+    ]
+    print(json.dumps(out))
+    sys.exit(1 if out else 0)
+    """
+)
+GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+
+
+@unittest.skipUnless(shutil.which("git"), "needs git")
+class LintFixture(unittest.TestCase):
+    """A throwaway git repo with a committed 10-line a.py and a fake ruff: one finding per FAKE_RUFF_ROWS row."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name) / "repo"
+        self.repo.mkdir()
+        self.log = Path(tmp.name) / "ruff.log"
+        fake = Path(tmp.name) / "fake_ruff.py"  # outside the repo, or it would be linted itself
+        fake.write_text(FAKE_RUFF)
+        self.git("init", "-q")
+        (self.repo / "a.py").write_text("".join(f"x{i} = {i}\n" for i in range(1, 11)))
+        (self.repo / "notes.md").write_text("notes\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "seed")
+        patcher = mock.patch.object(sdlc_check, "_ruff_cmd", return_value=[sys.executable, str(fake)])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        env = mock.patch.dict(os.environ, {"FAKE_RUFF_LOG": str(self.log), "FAKE_RUFF_ROWS": "", "FAKE_RUFF_EXIT": ""})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def git(self, *args):
+        subprocess.run([*GIT, *args], cwd=self.repo, check=True)
+
+    def edit_line(self, n, name="a.py"):
+        lines = (self.repo / name).read_text().splitlines(keepends=True)
+        lines[n - 1] = f"changed{n} = 0\n"
+        (self.repo / name).write_text("".join(lines))
+
+    def calls(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+
+class TestLint(LintFixture):
+    def lint(self, rows="", **kw):
+        os.environ["FAKE_RUFF_ROWS"] = rows
+        return sdlc_check.check_lint("HEAD", cwd=self.repo, **kw)
+
+    def test_lint_is_a_registered_check(self):
+        self.assertIn("lint", [name for name, _ in sdlc_check.CHECKS])
+
+    def test_skips_when_ruff_is_not_installed(self):
+        self.edit_line(5)
+        with mock.patch.object(sdlc_check, "_ruff_cmd", return_value=None):
+            status, detail = sdlc_check.check_lint("HEAD", cwd=self.repo)
+        self.assertEqual(status, "skip")
+        self.assertIn("ruff", detail)
+
+    def test_skips_when_git_cannot_diff_against_the_base(self):
+        status, _ = sdlc_check.check_lint("no-such-ref", cwd=self.repo)
+        self.assertEqual(status, "skip")
+
+    def test_passes_without_calling_ruff_when_no_python_file_changed(self):
+        (self.repo / "notes.md").write_text("more notes\n")
+        self.assertEqual(self.lint("1")[0], "pass")
+        self.assertEqual(self.calls(), [])
+
+    def test_fails_on_a_violation_on_a_changed_line(self):
+        self.edit_line(5)
+        status, detail = self.lint("5")
+        self.assertEqual(status, "fail")
+        self.assertIn("a.py:5:1 F401", detail)
+
+    def test_ignores_violations_on_untouched_lines_of_a_changed_file(self):
+        self.edit_line(5)
+        status, _ = self.lint("2,9")
+        self.assertEqual(status, "pass")
+        self.assertEqual(len(self.calls()), 1)  # ruff did run; the findings were filtered out
+
+    def test_reports_only_the_changed_lines_among_several_findings(self):
+        self.edit_line(5)
+        status, detail = self.lint("2,5,9")
+        self.assertEqual(status, "fail")
+        self.assertIn("a.py:5:1", detail)
+        self.assertNotIn("a.py:2:1", detail)
+        self.assertNotIn("a.py:9:1", detail)
+
+    def test_a_pure_deletion_changes_no_line(self):
+        lines = (self.repo / "a.py").read_text().splitlines(keepends=True)
+        del lines[4]
+        (self.repo / "a.py").write_text("".join(lines))
+        self.assertEqual(self.lint("4,5")[0], "pass")
+
+    def test_untracked_python_file_is_checked_in_full(self):
+        (self.repo / "b.py").write_text("y = 1\ny = 2\ny = 3\n")
+        status, detail = self.lint("2")
+        self.assertEqual(status, "fail")
+        self.assertIn("b.py:2:1", detail)
+
+    def test_deleted_python_file_is_not_passed_to_ruff(self):
+        (self.repo / "a.py").unlink()
+        self.assertEqual(self.lint("1")[0], "pass")
+        self.assertEqual(self.calls(), [])
+
+    def test_ruff_gets_only_the_changed_python_files_with_force_exclude_and_json(self):
+        self.edit_line(5)
+        (self.repo / "b.py").write_text("y = 1\n")
+        (self.repo / "c.md").write_text("doc\n")
+        self.lint("")
+        (args,) = self.calls()
+        files = [a for a in args if not a.startswith("-") and a not in ("check", "json")]
+        self.assertEqual(sorted(files), ["a.py", "b.py"])
+        self.assertIn("--force-exclude", args)
+        self.assertEqual(args[args.index("--output-format") + 1], "json")
+        self.assertNotIn("--fix", args)
+
+    def test_only_restricts_the_files(self):
+        self.edit_line(5)
+        (self.repo / "b.py").write_text("y = 1\n")
+        self.lint("", only=["b.py"])
+        (args,) = self.calls()
+        self.assertIn("b.py", args)
+        self.assertNotIn("a.py", args)
+
+    def test_ruff_error_fails_with_its_stderr(self):
+        self.edit_line(5)
+        os.environ["FAKE_RUFF_EXIT"] = "2"
+        status, detail = self.lint("")
+        self.assertEqual(status, "fail")
+        self.assertIn("invalid config", detail)
+
+
+HOOK_SCRIPT = SCRIPT.parent / "lint_hook.py"
+
+
+class TestLintHook(LintFixture):
+    def setUp(self):
+        super().setUp()
+        # A missing script must fail these tests (red), not skip them, so it is loaded here rather than at import time.
+        spec = importlib.util.spec_from_file_location("lint_hook", HOOK_SCRIPT)
+        self.lint_hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.lint_hook)
+        # The hook imports its own copy of sdlc_check; point that copy at the same fake ruff.
+        patcher = mock.patch.object(self.lint_hook.sdlc_check, "_ruff_cmd", return_value=sdlc_check._ruff_cmd())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def hook(self, path, rows="", tool="Edit"):
+        os.environ["FAKE_RUFF_ROWS"] = rows
+        payload = {"tool_name": tool, "tool_input": {"file_path": str(path)}}
+        return self.lint_hook.run(payload, root=self.repo, base="HEAD")
+
+    def test_a_finding_on_a_changed_line_exits_2_with_the_report(self):
+        self.edit_line(5)
+        code, report = self.hook(self.repo / "a.py", "5")
+        self.assertEqual(code, 2)
+        self.assertIn("a.py:5:1 F401", report)
+
+    def test_a_finding_on_an_untouched_line_exits_0(self):
+        self.edit_line(5)
+        self.assertEqual(self.hook(self.repo / "a.py", "2")[0], 0)
+
+    def test_a_clean_file_exits_0(self):
+        self.edit_line(5)
+        self.assertEqual(self.hook(self.repo / "a.py", "")[0], 0)
+
+    def test_only_the_edited_file_is_linted(self):
+        self.edit_line(5)
+        (self.repo / "b.py").write_text("y = 1\n")
+        self.hook(self.repo / "a.py", "")
+        (args,) = self.calls()
+        self.assertIn("a.py", args)
+        self.assertNotIn("b.py", args)
+
+    def test_relative_paths_are_resolved_against_the_repo_root(self):
+        self.edit_line(5)
+        self.assertEqual(self.hook("a.py", "5")[0], 2)
+
+    def test_everything_that_is_not_a_finding_exits_0_without_calling_ruff(self):
+        (self.repo / "notes.md").write_text("more\n")
+        outside = self.repo.parent / "out.py"
+        outside.write_text("x = 1\n")
+        cases = {"markdown": self.repo / "notes.md", "outside the repo": outside, "missing": self.repo / "nope.py"}
+        for name, path in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.hook(path, "1"), (0, ""))
+        self.assertEqual(self.lint_hook.run({"tool_input": {}}, root=self.repo, base="HEAD"), (0, ""))
+        self.assertEqual(self.lint_hook.run("not a dict", root=self.repo, base="HEAD"), (0, ""))
+        self.assertEqual(self.calls(), [])
+
+    def test_missing_ruff_exits_0(self):
+        self.edit_line(5)
+        with mock.patch.object(self.lint_hook.sdlc_check, "_ruff_cmd", return_value=None):
+            code, _ = self.lint_hook.run({"tool_input": {"file_path": "a.py"}}, root=self.repo, base="HEAD")
+        self.assertEqual(code, 0)
+
+    def test_script_ignores_invalid_json_on_stdin(self):
+        proc = subprocess.run([sys.executable, str(HOOK_SCRIPT)], input="not json", capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0)
 
 
 if __name__ == "__main__":

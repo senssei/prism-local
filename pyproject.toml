@@ -36,7 +36,7 @@ jinja = ["jinja2>=3.1"]
 # `prism convert`: ONNX Runtime GenAI's model builder imports these at start-up, and the onnxruntime-genai wheel declares none of them.
 # It also needs onnxruntime-genai (any build): combine with `cuda`, or install `onnxruntime-genai` for CPU. Heavy: torch alone is GBs.
 convert = ["torch", "transformers", "onnx-ir", "safetensors"]
-dev = ["pytest", "jinja2>=3.1"]
+dev = ["pytest", "jinja2>=3.1", "ruff>=0.6"]
 docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5,<10"]
 
 [project.urls]
@@ -53,3 +53,37 @@ packages = ["prism"]
 
 [tool.setuptools.dynamic]
 version = { attr = "prism.__version__" }
+
+# Lint only; nothing is auto-formatted (see `[tool.ruff.format]` note below). `scripts/sdlc_check.py --only lint` runs `ruff check` on the
+# changed files and reports only violations on changed lines, so the old code is not this change's debt (spec.md section 5).
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = ["site", "scratch"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes: unused imports and variables, undefined names
+    "I",        # isort
+    "B",        # bugbear: raise-from, unused loop variable, blind assert
+    "UP",       # pyupgrade
+    "S",        # bandit: eval/exec, pickle, shell=True, try-except-pass, hardcoded secrets
+]
+ignore = [
+    # The code base spells types with `typing.List/Dict/Optional` and new code matches the module it lands in (AGENTS.md).
+    "UP006", "UP007", "UP035", "UP045",
+    # A local server that fetches URLs and runs `ollama`/`nvidia-smi` by list-argv on purpose; `shell=True` (S602) stays on.
+    "S310", "S603", "S607", "S104", "S108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106"]   # asserts and fake tokens are what tests are made of
+
+[tool.ruff.lint.isort]
+known-first-party = ["prism", "foundry_wsl"]
+
+# No formatter gate: the code base was never machine-formatted and a reformat would bury the history. Run `ruff format --diff FILE`
+# to look at a file you are rewriting anyway; do not apply it to whole files.
+[tool.ruff.format]
+line-ending = "lf"

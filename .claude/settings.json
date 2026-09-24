@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m unittest *)",
+      "Bash(PYTHONPATH=. python3 -m unittest *)",
+      "Bash(python3 scripts/sdlc_check.py *)",
+      "Bash(python3 scripts/sdlc_check.py)",
+      "Bash(ruff check *)",
+      "Bash(ruff format --diff *)",
+      "Bash(.venv/bin/ruff check *)",
+      "Bash(.venv/bin/ruff format --diff *)",
+      "Bash(mkdocs build --strict)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)"
+    ],
+    "ask": [
+      "Bash(git push *)"
+    ],
+    "deny": [
+      "Bash(git * --no-verify*)",
+      "Bash(git push --force*)",
+      "Bash(git push * --force*)",
+      "Bash(rm -rf *)",
+      "Read(./.env)",
+      "Read(./.env.*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/lint_hook.py\"",
+            "timeout": 30,
+            "statusMessage": "ruff (changed lines)"
+          }
+        ]
+      }
+    ]
+  }
+}

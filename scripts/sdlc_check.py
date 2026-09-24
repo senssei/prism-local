@@ -5,7 +5,7 @@ Skills tell an agent *when* to run this; the checks themselves live here so the 
 runs them. Standard library only.
 
     python3 scripts/sdlc_check.py                 # all checks against the diff from `main`
-    python3 scripts/sdlc_check.py --only tests    # one check: compile, tests, changelog, docs
+    python3 scripts/sdlc_check.py --only tests    # one check: compile, tests, changelog, docs, lint
     python3 scripts/sdlc_check.py --base origin/main
     python3 scripts/sdlc_check.py --red tests.test_x.TestY.test_z   # red-first: these tests must FAIL now
 
@@ -15,6 +15,7 @@ Exit status is 0 when every selected check passed or was skipped (with --red: wh
 import argparse
 import contextlib
 import io
+import json
 import os
 import re
 import shutil
@@ -23,7 +24,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 # Result: (status, detail) with status one of "pass", "fail", "skip".
@@ -58,6 +59,38 @@ def changed_files(base: str, cwd: Path = ROOT) -> Optional[List[str]]:
     return sorted({*filter(None, diff.stdout.split("\0")), *filter(None, untracked.stdout.split("\0"))})
 
 
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def changed_line_ranges(base: str, files: List[str], cwd: Path = ROOT) -> Optional[Dict[str, List[Tuple[int, int]]]]:
+    """Inclusive (first, last) line ranges of `files` changed since the merge-base with `base`; None if git cannot tell.
+
+    Every line of an untracked file counts as changed. A pure deletion changes no line of the new file. One
+    `git diff -U0` per file, so a path never has to be parsed back out of the diff.
+    """
+    mb = _run(["git", "merge-base", base, "HEAD"], cwd=cwd)
+    untracked = _run(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=cwd)
+    if mb.returncode != 0 or untracked.returncode != 0:
+        return None
+    new = set(filter(None, untracked.stdout.split("\0")))
+    ranges: Dict[str, List[Tuple[int, int]]] = {}
+    for f in files:
+        if f in new:
+            ranges[f] = [(1, sys.maxsize)]
+            continue
+        diff = _run(["git", "diff", "-U0", "--no-color", "--no-ext-diff", mb.stdout.strip(), "--", f], cwd=cwd)
+        if diff.returncode != 0:
+            return None
+        ranges[f] = []
+        for line in diff.stdout.splitlines():
+            hunk = _HUNK.match(line)
+            if hunk:
+                start, count = int(hunk.group(1)), int(hunk.group(2) or 1)
+                if count:
+                    ranges[f].append((start, start + count - 1))
+    return ranges
+
+
 def check_compile(_base: str) -> Result:
     proc = _run([sys.executable, "-m", "compileall", "-q", "prism", "foundry_wsl", "tests", "scripts"])
     return ("pass", "") if proc.returncode == 0 else ("fail", _tail(proc))
@@ -86,6 +119,59 @@ def check_docs(_base: str) -> Result:
         return "skip", 'mkdocs not installed (pip install -e ".[docs]")'
     proc = _run([sys.executable, "-m", "mkdocs", "build", "--strict", "--site-dir", str(ROOT / "scratch" / "site-check")])
     return ("pass", "") if proc.returncode == 0 else ("fail", _tail(proc))
+
+
+def _ruff_cmd() -> Optional[List[str]]:
+    """The command that runs ruff: `ruff` on PATH, the checkout's `.venv`, or `python -m ruff`; None if missing."""
+    found = shutil.which("ruff")
+    if found:
+        return [found]
+    venv = ROOT / ".venv" / "bin" / "ruff"
+    if venv.is_file():
+        return [str(venv)]
+    if _run([sys.executable, "-m", "ruff", "--version"]).returncode == 0:
+        return [sys.executable, "-m", "ruff"]
+    return None
+
+
+def check_lint(base: str, cwd: Path = ROOT, only: Optional[List[str]] = None) -> Result:
+    """ruff on the changed Python files, reporting only violations on changed lines (old code is not this diff's debt).
+
+    `only` restricts the files (repo-relative paths); the edit hook passes the one file it just saw written.
+    Never modifies a file.
+    """
+    ruff = _ruff_cmd()
+    if ruff is None:
+        return "skip", 'ruff not installed (pip install -e ".[dev]")'
+    files = changed_files(base, cwd)
+    if files is None:
+        return "skip", f"cannot diff against {base!r} (no such ref or not a git checkout)"
+    py = [f for f in files if f.endswith(".py") and (cwd / f).is_file() and (only is None or f in only)]
+    if not py:
+        return "pass", "no Python file changed"
+    ranges = changed_line_ranges(base, py, cwd)
+    if ranges is None:
+        return "skip", f"cannot diff against {base!r} (no such ref or not a git checkout)"
+    proc = _run([*ruff, "check", "--force-exclude", "--output-format", "json", *py], cwd=cwd)
+    try:
+        findings = json.loads(proc.stdout or "[]")
+    except ValueError:
+        findings = None
+    if proc.returncode not in (0, 1) or not isinstance(findings, list):
+        return "fail", _tail(proc) or f"ruff exited {proc.returncode} without a report"
+    report = []
+    for item in findings:
+        try:
+            name = Path(item["filename"]).resolve().relative_to(cwd.resolve()).as_posix()
+        except ValueError:
+            name = item["filename"]
+        row, col = item["location"]["row"], item["location"]["column"]
+        last = (item.get("end_location") or {}).get("row", row)
+        if any(row <= b and a <= last for a, b in ranges.get(name, [])):
+            report.append((name, row, col, f"{name}:{row}:{col} {item['code']} {item['message']}"))
+    if report:
+        return "fail", "\n".join(line for *_, line in sorted(report))
+    return "pass", f"{len(py)} Python file(s), no violation on a changed line"
 
 
 def _flatten(suite: unittest.TestSuite) -> List[unittest.TestCase]:
@@ -179,6 +265,7 @@ CHECKS: List[Tuple[str, Callable[[str], Result]]] = [
     ("tests", check_tests),
     ("changelog", check_changelog),
     ("docs", check_docs),
+    ("lint", check_lint),
 ]
 
 

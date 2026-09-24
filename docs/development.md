@@ -44,7 +44,20 @@ Pages are published to GitHub Pages by `.github/workflows/docs.yml` on every pus
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs the unit tests on Python 3.10–3.12, byte-compiles the package, and builds a wheel that is
-installed in a fresh virtualenv and smoke-tested with `prism --help` and `prism doctor`.
+installed in a fresh virtualenv and smoke-tested with `prism --help` and `prism doctor`. On pull requests it also runs the
+changelog check and `ruff` on the lines the pull request changed (see [Lint](#lint)).
+
+## Lint
+
+`ruff` is configured in `pyproject.toml` (`pip install -e ".[dev]"`). Nothing is auto-formatted and old code is not a debt: the
+gate reports only violations **on lines you changed**.
+
+```bash
+ruff check path/to/changed.py                      # everything in the file, for your information
+python3 scripts/sdlc_check.py --only lint          # what the gate and CI enforce: changed lines only
+```
+
+The check skips itself when `ruff` is not installed. It is not part of the opt-in pre-commit hook.
 
 ## Working with AI coding agents
 
@@ -57,7 +70,10 @@ non-trivial change goes through intent, spec, plan, test, code and review, and e
 | `CLAUDE.md` | Claude Code | Imports `AGENTS.md`, adds Claude-only notes |
 | `intent.md`, `spec.md`, `plan.md`, `REVIEW.md` | Agents and humans | Intent, specification, plan (the state of the work) and review policy |
 | `.agents/skills/sdlc*` | Skill-aware agents; Claude Code through the `.claude/skills` symlink | One skill per stage group |
-| `scripts/sdlc_check.py` | Agents, humans, CI | Deterministic gate (compile, tests, changelog, docs) and `--red` |
+| `.agents/skills/python-conventions` | Same | How to write Python in this repository |
+| `scripts/sdlc_check.py` | Agents, humans, CI | Deterministic gate (compile, tests, changelog, docs, lint) and `--red` |
+| `.claude/settings.json`, `scripts/lint_hook.py` | Claude Code | Shared permissions and a hook that runs `ruff` on each edited Python file |
+| `.editorconfig` | Editors | Encoding, line endings, indentation |
 | `.githooks/pre-commit` | git (opt-in) | Runs the gate before each commit: `git config core.hooksPath .githooks` |
 
 Details: [Agent SDLC workflow](sdlc.md).

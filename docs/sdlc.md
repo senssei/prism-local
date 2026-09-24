@@ -33,7 +33,8 @@ note. A bug fix starts at stage 4; a typo or a docs wording change skips stages 
 | `CLAUDE.md` | Imports `AGENTS.md` for Claude Code |
 | `intent.md`, `spec.md`, `plan.md`, `REVIEW.md` | The artifacts of the stages above |
 | `.agents/skills/<name>/SKILL.md` | One skill per stage group, plus the `sdlc` router. `.claude/skills` is a symlink to it |
-| `scripts/sdlc_check.py` | The deterministic gate, and `--red` for the test-first stage |
+| `scripts/sdlc_check.py` | The deterministic gate (compile, tests, changelog, docs, lint), and `--red` for the test-first stage |
+| `.claude/settings.json`, `scripts/lint_hook.py` | Claude Code: shared permissions, and a hook that lints each edited Python file (changed lines only) |
 | `.githooks/pre-commit` | Opt-in hook that runs the gate before every commit |
 
 Start with `/sdlc` in Claude Code, or ask another agent to "use the sdlc skill". The router reads `plan.md` and git and names the stage.
@@ -45,12 +46,13 @@ Start with `/sdlc` in Claude Code, or ask another agent to "use the sdlc skill".
 | `sdlc-implement` | 4 and 5 |
 | `sdlc-review` | 6, with a fresh subagent or session |
 | `sdlc-release` | commit, PR and release, only when the operator asks |
+| `python-conventions` | reference for writing Python here; not a stage |
 
 ## The gate
 
 ```bash
 python3 scripts/sdlc_check.py                # everything, diffed against main
-python3 scripts/sdlc_check.py --only tests   # compile, tests, changelog or docs
+python3 scripts/sdlc_check.py --only tests   # compile, tests, changelog, docs or lint
 python3 scripts/sdlc_check.py --base origin/main
 ```
 
